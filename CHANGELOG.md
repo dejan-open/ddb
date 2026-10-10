@@ -4,6 +4,12 @@ All notable changes to ddb are documented here.
 
 ## [Unreleased] — 2026-06-11 — Epic M ✓ CLOSED + Wave 15-19 ledger
 
+### Compose visuals in the semantic walk
+- **Compose elements carry what they draw, not only what they say.** The agent now walks Compose's LayoutNode tree and reads each node's modifier chain: background (solid or gradient brush), border, corner radius (Dp, px and percent corners), shadow elevation, padding vs margin (padding before or after the first drawing modifier), painter (raster / vector / loaded, with icon tint), and text style (family, including resource fonts; weight; size; color). `line_count` and `truncated` come from the text layout. Semantics still come from the unmerged SemanticsNode tree, matched by semantics id, so it works across Compose releases whose LayoutNode getters are renamed or internal. The semantics-only walk stays as the fallback.
+- Undescribed images and plain cards are emitted (`type: image` / `container`). A clickable element that draws a border, gradient or image is no longer dropped as a ghost touch target.
+- The YAML now writes `border` (`width`, `color`, the iOS agent's shape) and `gradient` (`type`, `colors`, `orientation`), which the walker already computed for Views but never serialized.
+- Demo screen **T27 Visuals** exercises each attribute; `ComposeVisualsTest` covers the pure helpers, and CI runs the agent unit tests.
+
 ### Wave 19 — TD-128 reset_demo forward race fix + M-10 canonical
 - **TD-128 / reset_demo forward race** (`c1c16cd`): root-cause fix for the cross-app port-collision class that aborted XML sweeps pre-TC1. After `am force-stop $PACKAGE` + `am start $PACKAGE/$MAIN_ACTIVITY` inside `reset_demo()`, the per-device adb forward state can be invalidated; the next `/health` probe lands on a wedged forward. Fix: hoist `ensure_agent_forward` + 1s settle into `reset_demo` so each per-TC restart re-establishes the forward atomically. 2-line core change; discriminator instrumentation stripped before commit.
   - Discriminating test confirmation: post-`reset_demo` `/health` returns 200 on every TC across a full sweep when forward is re-established; baseline (no re-forward) returned 000 from TC 2 onward. Wave-19 research validated builder's hypothesis (forward-state corruption) over the empty-`git_hash`-kills-agent dispatch premise (which was wrong — Compose has same empty `git_hash` and stays alive).

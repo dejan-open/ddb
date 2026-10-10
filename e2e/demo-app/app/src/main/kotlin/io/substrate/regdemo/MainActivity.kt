@@ -48,6 +48,7 @@ class MainActivity : ComponentActivity() {
                         composable("t26") { T26HideShowScreen() }
                         composable("t10") { T10MockURLScreen() }
                         composable("t13") { T13LoginScreen() }
+                        composable("t27") { T27VisualsScreen() }
                     }
                 }
             }

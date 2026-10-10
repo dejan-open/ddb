@@ -28,6 +28,7 @@ dependencies {
     compileOnly("com.squareup.okhttp3:okhttp:4.12.0")
     compileOnly("com.squareup.retrofit2:retrofit:2.11.0")
     compileOnly("androidx.recyclerview:recyclerview:1.3.2")
+    testImplementation("junit:junit:4.13.2")
 }
 
 afterEvaluate {

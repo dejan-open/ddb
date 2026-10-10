@@ -249,7 +249,9 @@ object ViewTreeWalker {
             if (!a.clickable) continue
             if (a.type != "button" && a.type != "view") continue
             if (!a.content.isNullOrEmpty()) continue
-            if (a.background != null) continue
+            // A touch target that draws something (an outlined button, a
+            // gradient pill, an icon) is a real element, not a ghost.
+            if (a.background != null || a.border != null || a.gradient != null || a.imageType != null) continue
 
             for (j in elements.indices) {
                 if (i == j) continue
@@ -419,19 +421,178 @@ object ViewTreeWalker {
         } catch (e: Throwable) {
             log.appendLine("COMPOSE_SEM owner fetch failed=${e.javaClass.simpleName}:${e.message}")
             null
-        } ?: return false
+        }
 
         val rootNode = try {
-            val m = owner.javaClass.methods.firstOrNull { it.name == "getUnmergedRootSemanticsNode" && it.parameterCount == 0 }
-                ?: owner.javaClass.methods.firstOrNull { it.name == "getRootSemanticsNode" && it.parameterCount == 0 }
+            val m = owner?.javaClass?.methods?.firstOrNull { it.name == "getUnmergedRootSemanticsNode" && it.parameterCount == 0 }
+                ?: owner?.javaClass?.methods?.firstOrNull { it.name == "getRootSemanticsNode" && it.parameterCount == 0 }
             m?.invoke(owner)
         } catch (e: Throwable) {
             log.appendLine("COMPOSE_SEM root fetch failed=${e.javaClass.simpleName}:${e.message}")
             null
-        } ?: return false
+        }
 
+        // Preferred: the LayoutNode tree, which carries each node's modifier
+        // chain (background, border, shape, painter, text style). Its
+        // semantics come from the unmerged SemanticsNode tree, keyed by the
+        // semantics id both trees share — LayoutNode's own config getter has
+        // been renamed across Compose releases, the id has not. Falls back to
+        // the semantics-only walk if the LayoutNode surface isn't reachable.
+        val before = out.size
+        try {
+            val root = androidComposeView.javaClass.methods
+                .firstOrNull { it.name == "getRoot" && it.parameterCount == 0 && it.returnType.simpleName == "LayoutNode" }
+                ?.invoke(androidComposeView)
+            if (root != null) {
+                val configs = HashMap<Int, Any>()
+                if (rootNode != null) collectSemanticsConfigs(rootNode, configs)
+                val res = androidComposeView.resources
+                walkLayoutNode(root, configs, density, res.configuration.fontScale, res, nextZ, out, log, false)
+                log.appendLine("COMPOSE_LAYOUT ok configs=${configs.size} emitted=${out.size - before}")
+                return true
+            }
+        } catch (e: Throwable) {
+            log.appendLine("COMPOSE_LAYOUT failed=${e.javaClass.simpleName}:${e.message}")
+            while (out.size > before) out.removeAt(out.size - 1)
+        }
+
+        if (rootNode == null) return false
         walkSemanticsNode(rootNode, density, nextZ, out, log, 0, false)
         return true
+    }
+
+    private fun collectSemanticsConfigs(node: Any, out: MutableMap<Int, Any>) {
+        val id = ComposeVisuals.invoke0(node, "getId") as? Int
+        val config = ComposeVisuals.invoke0(node, "getConfig")
+        if (id != null && config != null) out[id] = config
+        val children = try {
+            val m = node.javaClass.methods.firstOrNull { it.name == "getChildren" && it.parameterCount == 0 }
+                ?: node.javaClass.methods.firstOrNull { it.name == "getReplacedChildren" && it.parameterCount == 0 }
+            m?.invoke(node) as? List<*>
+        } catch (_: Throwable) { null } ?: return
+        for (child in children) if (child != null) collectSemanticsConfigs(child, out)
+    }
+
+    /**
+     * One LayoutNode: its own (unmerged) semantics plus what its modifier
+     * chain draws. A node is emitted when it says something (text, content
+     * description, role, click, input) or draws something (background,
+     * gradient, border, image) — so undescribed images and plain cards show
+     * up too, which the semantics-only walk could never report.
+     */
+    private fun walkLayoutNode(
+        node: Any,
+        configs: Map<Int, Any>,
+        density: Float,
+        fontScale: Float,
+        resources: android.content.res.Resources,
+        nextZ: () -> Int,
+        out: MutableList<SemanticElement>,
+        log: StringBuilder,
+        inheritedClickable: Boolean,
+    ) {
+        if (ComposeVisuals.invoke0(node, "isPlaced") == false) return
+        // The outer coordinator is the box the node occupies, before any of
+        // its own padding; getCoordinates is the inner (content) box.
+        val coords = ComposeVisuals.invokeInternal(node, "getOuterCoordinator") ?: ComposeVisuals.invoke0(node, "getCoordinates")
+        val bounds = coords?.let { ComposeVisuals.boundsInWindow(it) }
+        val visuals = ComposeVisuals.read(node, density, fontScale, resources, bounds)
+        if (visuals.alpha != null && visuals.alpha <= 0f) {
+            log.appendLine("COMPOSE_SKIP hidden alpha=0 bounds=$bounds")
+            return
+        }
+
+        val config = (ComposeVisuals.invokeInternal(node, "getSemanticsId") as? Int)?.let { configs[it] }
+        val text = extractSemanticsText(config)
+        val contentDesc = extractSemanticsContentDesc(config)
+        val role = extractSemanticsRole(config)
+        val isDisabled = hasSemanticsKey(config, "Disabled")
+        val ownClick = hasSemanticsAction(config, "OnClick") && !isDisabled
+        val isClickable = ownClick || (inheritedClickable && !isDisabled)
+        val isInput = hasSemanticsKey(config, "EditableText") || hasSemanticsAction(config, "SetText")
+        val content = text ?: contentDesc
+        val isImage = visuals.imageType != null || role == "Image"
+
+        val says = content != null || ownClick || isInput || role != null || (isClickable && text != null)
+        val elementBounds = if (says) bounds else visuals.drawBounds ?: bounds
+        if (elementBounds != null && (says || visuals.draws)) {
+            val type = when {
+                isInput -> "input"
+                isClickable && (ownClick || text != null) -> "button"
+                text != null -> "text"
+                isImage -> "image"
+                visuals.draws -> "container"
+                else -> "view"
+            }
+            val id = if (!content.isNullOrEmpty()) slugify(content)
+                else "compose_${type}_${elementBounds.x}_${elementBounds.y}"
+            val layout = if (text != null) textLayout(config) else null
+            val z = nextZ()
+            out.add(
+                SemanticElement(
+                    id = id, platformId = null, type = type, content = content,
+                    font = if (text != null) visuals.font else null,
+                    color = if (text != null) visuals.textColor else visuals.imageTint,
+                    bounds = elementBounds, zIndex = z,
+                    clickable = isClickable, enabled = !isDisabled, accessible = config != null,
+                    a11yLabel = contentDesc, a11yId = null,
+                    background = visuals.background,
+                    cornerRadius = visuals.cornerRadius,
+                    padding = visuals.padding, margin = visuals.margin,
+                    elevation = visuals.elevation, render = null,
+                    lineCount = layout?.first, truncated = layout?.second,
+                    imageResource = if (isImage) id else null,
+                    imageType = visuals.imageType ?: if (isImage) "vector" else null,
+                    imagePath = null,
+                    border = visuals.border, gradient = visuals.gradient, tapTarget = null,
+                ),
+            )
+            log.appendLine("COMPOSE_EMIT z=$z type=$type bounds=$elementBounds bg=${visuals.background} img=${visuals.imageType} content=${content?.take(30) ?: "null"}")
+        }
+
+        // LayoutNode.children is internal, so its getter is name-mangled
+        // (getChildren$ui); getChildrenInfo is the public fallback.
+        val methods = node.javaClass.methods.filter { it.parameterCount == 0 && List::class.java.isAssignableFrom(it.returnType) }
+        val children = (
+            methods.firstOrNull { it.name == "getChildren" || it.name.startsWith("getChildren$") }
+                ?: methods.firstOrNull { it.name == "getChildrenInfo" }
+            )?.let { m -> try { m.invoke(node) as? List<*> } catch (_: Throwable) { null } }
+            ?: return
+        for (child in children) {
+            if (child != null) walkLayoutNode(child, configs, density, fontScale, resources, nextZ, out, log, isClickable)
+        }
+    }
+
+    /** (lineCount, truncated) from the node's GetTextLayoutResult semantics action. */
+    private fun textLayout(config: Any?): Pair<Int?, Boolean?>? {
+        if (config == null) return null
+        try {
+            val iter = (config as? Iterable<*>)?.iterator() ?: return null
+            while (iter.hasNext()) {
+                val entry = iter.next() ?: continue
+                val key = entry.javaClass.getMethod("getKey").invoke(entry)
+                val keyName = key?.javaClass?.getMethod("getName")?.invoke(key) as? String
+                if (keyName != "GetTextLayoutResult") continue
+                val action = entry.javaClass.getMethod("getValue").invoke(entry)
+                val fn = ComposeVisuals.invoke0(action, "getAction") ?: return null
+                val results = ArrayList<Any?>()
+                @Suppress("UNCHECKED_CAST")
+                (fn as? Function1<Any?, Any?>)?.invoke(results)
+                val result = results.firstOrNull() ?: return null
+                val lines = (ComposeVisuals.invoke0(result, "getLineCount") as? Int)?.takeIf { it > 0 }
+                // Truncated = the last laid-out line ends in an ellipsis. The
+                // overflow flags are no signal: sub-pixel rounding sets
+                // didOverflowWidth (and a tall line height hasVisualOverflow)
+                // on text that is drawn whole.
+                val ellipsized = lines?.let { n ->
+                    result.javaClass.methods
+                        .firstOrNull { it.name == "isLineEllipsized" && it.parameterCount == 1 }
+                        ?.invoke(result, n - 1) as? Boolean
+                }
+                return Pair(lines, ellipsized)
+            }
+        } catch (_: Throwable) {}
+        return null
     }
 
     private fun findAndroidComposeView(view: View): View? {

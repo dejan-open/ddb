@@ -43,6 +43,7 @@ fun HomeScreen(nav: NavController) {
         "t26" to "T26 Hide Show",
         "t10" to "T10 Mock URL",
         "t13" to "T13 Login",
+        "t27" to "T27 Visuals",
     )
     LazyVerticalGrid(
         columns = GridCells.Fixed(2),

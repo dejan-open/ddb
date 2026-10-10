@@ -38,6 +38,10 @@ jobs:
         working-directory: agent
         run: ./gradlew :agent:assembleRelease --no-daemon
 
+      - name: agent unit tests
+        working-directory: agent
+        run: ./gradlew :agent:testDebugUnitTest --no-daemon
+
       - name: assemble e2e demo APK
         working-directory: e2e/demo-app
         run: ./gradlew assembleDebug --init-script $PWD/init.gradle.kts --no-daemon

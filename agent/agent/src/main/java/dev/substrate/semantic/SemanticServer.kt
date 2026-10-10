@@ -1553,6 +1553,18 @@ class SemanticServer private constructor(
             e.a11yId?.let { sb.appendLine("  a11y_id: \"${escape(it)}\"") }
             e.background?.let { sb.appendLine("  background: \"${it}\"") }
             e.cornerRadius?.let { sb.appendLine("  corner_radius: $it") }
+            // Same shape as the iOS agent's emitter (border: width/color).
+            e.border?.let { b ->
+                sb.appendLine("  border:")
+                sb.appendLine("    width: ${b.width}")
+                b.color?.let { sb.appendLine("    color: \"$it\"") }
+            }
+            e.gradient?.let { g ->
+                sb.appendLine("  gradient:")
+                sb.appendLine("    type: ${g.type}")
+                sb.appendLine("    colors: [${g.colors.joinToString(", ") { "\"$it\"" }}]")
+                g.orientation?.let { sb.appendLine("    orientation: $it") }
+            }
             e.padding?.let { p ->
                 sb.appendLine("  padding:")
                 sb.appendLine("    top: ${p.top}")
