@@ -52,6 +52,22 @@ class ComposeVisualsTest {
     }
 
     @Test
+    fun transparent_colors_drop_except_as_gradient_stops() {
+        assertNull(ComposeVisuals.argbHex(0x00000000, keepTransparent = false))
+        assertEquals("#00000000", ComposeVisuals.argbHex(0x00000000, keepTransparent = true))
+        assertEquals("#FF0000", ComposeVisuals.argbHex(0xFFFF0000.toInt(), keepTransparent = false))
+    }
+
+    @Test
+    fun hairline_border_is_one_physical_pixel() {
+        assertEquals(1f / 2.625f, ComposeVisuals.borderWidthDp(0f, 2.625f)!!, 1e-6f)
+        assertEquals(2f, ComposeVisuals.borderWidthDp(2f, 3f)!!, 0f)
+        assertNull(ComposeVisuals.borderWidthDp(-1f, 3f))
+        assertNull(ComposeVisuals.borderWidthDp(Float.NaN, 3f))
+        assertNull(ComposeVisuals.borderWidthDp(null, 3f))
+    }
+
+    @Test
     fun field_reads_private_backing_fields_through_superclasses() {
         open class Base(private val shape: String)
         class Element(private val brush: String) : Base("rounded")

@@ -66,7 +66,7 @@ internal object ComposeVisuals {
                 }
                 "BorderModifierNodeElement" -> {
                     seenDraw = true
-                    val width = (field(element, "width") as? Float)?.takeIf { it.isFinite() && it > 0f }
+                    val width = borderWidthDp(field(element, "width") as? Float, density)
                     val brush = field(element, "brush")
                     val color = solidBrushHex(brush, element)
                     // A solid border with no color left is a fully transparent one: not drawn.
@@ -194,6 +194,23 @@ internal object ComposeVisuals {
             else -> b - a
         }
 
+    /**
+     * A drawn color's hex, or null when it is fully transparent and so draws nothing.
+     * Gradient stops pass [keepTransparent]: a transparent stop still shapes the fade.
+     */
+    fun argbHex(argb: Int, keepTransparent: Boolean): String? =
+        if (!keepTransparent && (argb ushr 24) == 0) null else argbToHex(argb)
+
+    /**
+     * Border width in dp. `Dp.Hairline` is stored as 0 and Compose draws it as one physical
+     * pixel, so 0 reports one pixel in dp rather than "no border".
+     */
+    fun borderWidthDp(width: Float?, density: Float): Float? = when {
+        width == null || !width.isFinite() || width < 0f -> null
+        width == 0f -> if (density.isFinite() && density > 0f) 1f / density else null
+        else -> width
+    }
+
     fun argbToHex(color: Int): String {
         val a = (color shr 24) and 0xFF
         val r = (color shr 16) and 0xFF
@@ -293,7 +310,9 @@ internal object ComposeVisuals {
         }
         val colors = (field(brush, "colors") as? List<*>)?.mapNotNull { c ->
             val packed = c?.javaClass?.methods?.firstOrNull { it.name == "unbox-impl" }?.invoke(c) as? Long
-            packed?.let { colorHex(anchor, it) }
+            // A transparent stop is still a stop: Compose hands every color to the shader,
+            // so a fade to Color.Transparent keeps its #00000000 end.
+            packed?.let { colorHex(anchor, it, keepTransparent = true) }
         } ?: return null
         if (colors.size < 2) return null
         val orientation = if (type == "linear") {
@@ -368,16 +387,14 @@ internal object ComposeVisuals {
         }
     }
 
-    private fun colorHex(anchor: Any, packed: Long): String? {
+    private fun colorHex(anchor: Any, packed: Long, keepTransparent: Boolean = false): String? {
         if (packed == UNSPECIFIED_COLOR) return null
         return try {
             val kt = Class.forName("androidx.compose.ui.graphics.ColorKt", false, anchor.javaClass.classLoader)
             val m = kt.methods.firstOrNull {
                 it.name.startsWith("toArgb") && it.parameterCount == 1 && it.parameterTypes[0] == java.lang.Long.TYPE
             }
-            (m?.invoke(null, packed) as? Int)?.let { argb ->
-                if ((argb ushr 24) == 0) null else argbToHex(argb)
-            }
+            (m?.invoke(null, packed) as? Int)?.let { argbHex(it, keepTransparent) }
         } catch (_: Throwable) {
             null
         }
