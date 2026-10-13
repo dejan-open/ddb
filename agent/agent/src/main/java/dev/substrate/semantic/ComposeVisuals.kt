@@ -29,11 +29,12 @@ internal data class ComposeDrawInfo(
     val drawBounds: Bounds? = null,
 ) {
     val draws: Boolean
-        get() = background != null || gradient != null || border != null || imageType != null
+        // A shadow is drawn on its own, with no background or content under it.
+        get() = background != null || gradient != null || border != null || imageType != null || elevation != null
 }
 
 internal object ComposeVisuals {
-    private const val UNSPECIFIED_COLOR = 16L
+    const val UNSPECIFIED_COLOR = 16L
 
     fun read(
         layoutNode: Any,
@@ -89,6 +90,15 @@ internal object ComposeVisuals {
                             imageTint = colorFilterHex(field(element, "colorFilter"), element),
                             drawBounds = v.drawBounds ?: modifierBounds(info, nodeBounds),
                         )
+                    } else if (painter?.javaClass?.simpleName == "ColorPainter" && v.background == null) {
+                        // ColorPainter fills its bounds with one color: that is a background, not an image.
+                        val fill = (field(painter, "color") as? Long)?.let { colorHex(element, it) }
+                        if (fill != null) {
+                            v = v.copy(
+                                background = fill,
+                                drawBounds = v.drawBounds ?: modifierBounds(info, nodeBounds),
+                            )
+                        }
                     }
                 }
                 "ShadowGraphicsLayerElement" -> {
@@ -121,7 +131,7 @@ internal object ComposeVisuals {
                 "TextStringSimpleElement", "TextAnnotatedStringElement" -> {
                     val style = field(element, "style")
                     val producer = field(element, "color")
-                    val color = producerColorHex(producer, element) ?: styleColorHex(style, element)
+                    val color = textColorHex(producer, style, element)
                     val maxLines = (field(element, "maxLines") as? Int)?.takeIf { it in 1 until Int.MAX_VALUE }
                     v = v.copy(
                         font = v.font ?: font(style, fontScale, resources),
@@ -272,22 +282,37 @@ internal object ComposeVisuals {
         }
     }
 
-    private fun styleColorHex(style: Any?, anchor: Any): String? {
-        if (style == null) return null
-        val packed = invokePrefix(style, "getColor") as? Long ?: return null
+    private fun textColorHex(producer: Any?, style: Any?, anchor: Any): String? {
+        val stylePacked = style?.let { invokePrefix(it, "getColor") as? Long }
+        val packed = textColorPacked(producer != null, producerPacked(producer), stylePacked) ?: return null
         return colorHex(anchor, packed)
     }
 
-    private fun producerColorHex(producer: Any?, anchor: Any): String? {
+    private fun producerPacked(producer: Any?): Long? {
         if (producer == null) return null
         return try {
             val m = producer.javaClass.methods.firstOrNull {
                 it.name.startsWith("invoke") && it.parameterCount == 0 && it.returnType == java.lang.Long.TYPE
             }
-            (m?.invoke(producer) as? Long)?.let { colorHex(anchor, it) }
+            m?.invoke(producer) as? Long
         } catch (_: Throwable) {
             null
         }
+    }
+
+    /** `Color.Black` packed: an sRGB color keeps its ARGB in the high 32 bits. */
+    const val BLACK_PACKED: Long = -0x100000000000000L
+
+    /**
+     * The color a BasicText draws with: the color producer, then the style's color, then
+     * black, which is what Compose falls back to when both are unspecified. Black is only
+     * reported when every source was actually read; an unreadable source yields null.
+     */
+    fun textColorPacked(hasProducer: Boolean, producer: Long?, style: Long?): Long? {
+        if (producer != null && producer != UNSPECIFIED_COLOR) return producer
+        if (style != null && style != UNSPECIFIED_COLOR) return style
+        val producerUnspecified = !hasProducer || producer == UNSPECIFIED_COLOR
+        return if (producerUnspecified && style == UNSPECIFIED_COLOR) BLACK_PACKED else null
     }
 
     private fun colorFilterHex(filter: Any?, anchor: Any): String? {

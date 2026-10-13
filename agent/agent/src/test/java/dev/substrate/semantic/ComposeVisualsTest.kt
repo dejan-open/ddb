@@ -68,6 +68,22 @@ class ComposeVisualsTest {
     }
 
     @Test
+    fun text_color_falls_back_to_black_only_when_every_source_is_unspecified() {
+        val unspecified = ComposeVisuals.UNSPECIFIED_COLOR
+        val red = 0xFFFF0000L shl 32
+        val blue = 0xFF0000FFL shl 32
+        assertEquals(red, ComposeVisuals.textColorPacked(true, red, blue))
+        assertEquals(blue, ComposeVisuals.textColorPacked(true, unspecified, blue))
+        assertEquals(blue, ComposeVisuals.textColorPacked(false, null, blue))
+        assertEquals(ComposeVisuals.BLACK_PACKED, ComposeVisuals.textColorPacked(false, null, unspecified))
+        assertEquals(ComposeVisuals.BLACK_PACKED, ComposeVisuals.textColorPacked(true, unspecified, unspecified))
+        assertEquals(0xFF000000L shl 32, ComposeVisuals.BLACK_PACKED)
+        // A producer or style that could not be read is not evidence of the default.
+        assertNull(ComposeVisuals.textColorPacked(true, null, unspecified))
+        assertNull(ComposeVisuals.textColorPacked(false, null, null))
+    }
+
+    @Test
     fun field_reads_private_backing_fields_through_superclasses() {
         open class Base(private val shape: String)
         class Element(private val brush: String) : Base("rounded")
