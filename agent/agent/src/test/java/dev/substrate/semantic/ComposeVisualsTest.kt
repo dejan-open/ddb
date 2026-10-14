@@ -108,6 +108,17 @@ class ComposeVisualsTest {
     }
 
     @Test
+    fun border_with_all_transparent_gradient_draws_nothing() {
+        assertEquals(false, ComposeVisuals.borderDraws("LinearGradient", null, listOf("#00000000", "#00FF0000")))
+        assertEquals(true, ComposeVisuals.borderDraws("LinearGradient", null, listOf("#FF0000", "#00000000")))
+        assertEquals(false, ComposeVisuals.borderDraws("SolidColor", null, null))
+        assertEquals(true, ComposeVisuals.borderDraws("SolidColor", "#FF0000", null))
+        // A shader brush, or a gradient whose stops could not be read, still draws.
+        assertEquals(true, ComposeVisuals.borderDraws("ShaderBrush", null, null))
+        assertEquals(true, ComposeVisuals.borderDraws(null, null, null))
+    }
+
+    @Test
     fun sp_packs_as_a_compose_text_unit() {
         // TextUnitType.Sp is 0x1_0000_0000; the value's float bits sit in the low word.
         assertEquals(0x1_0000_0000L or java.lang.Float.floatToRawIntBits(14f).toLong(), ComposeVisuals.packSp(14f))

@@ -114,7 +114,10 @@ internal object ComposeVisuals {
                     val brush = field(element, "brush")
                     val color = solidBrushHex(brush, element, layerAlpha())
                     // A solid border with no color left is a fully transparent one: not drawn.
-                    val invisible = color == null && brush?.javaClass?.simpleName == "SolidColor"
+                    // Compose strokes a gradient border with the brush itself, so one whose every
+                    // stop is transparent draws nothing either, as for backgrounds.
+                    val stops = gradient(brush, element, layerAlpha())?.colors
+                    val invisible = !borderDraws(brush?.javaClass?.simpleName, color, stops)
                     // Only a border that draws sets the inside/outside padding boundary.
                     if (width == null || invisible) continue
                     seenDraw = true
@@ -257,6 +260,18 @@ internal object ComposeVisuals {
     /** False when every stop is fully transparent (#00RRGGBB): such a gradient draws nothing. */
     fun gradientVisible(colors: List<String>): Boolean =
         colors.any { !(it.length == 9 && it.startsWith("#00")) }
+
+    /**
+     * Whether a border with brush class [brushClass] puts pixels on screen. A solid brush draws
+     * only with a color left ([solidColor]); a decoded gradient only when a stop is visible
+     * ([gradientStops], null when not a readable gradient). Any other brush (a ShaderBrush, a
+     * gradient whose stops failed to read) is assumed to draw.
+     */
+    fun borderDraws(brushClass: String?, solidColor: String?, gradientStops: List<String>?): Boolean = when {
+        brushClass == "SolidColor" -> solidColor != null
+        gradientStops != null -> gradientVisible(gradientStops)
+        else -> true
+    }
 
     /** Compose packs a Size like an Offset: width in the high 32 bits, height in the low. */
     fun packSize(width: Float, height: Float): Long =
