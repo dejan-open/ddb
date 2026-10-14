@@ -36,6 +36,11 @@ internal data class ComposeDrawInfo(
 internal object ComposeVisuals {
     const val UNSPECIFIED_COLOR = 16L
 
+    /** Elements that put pixels on screen (a layer at alpha 0 hides those after it). */
+    private val DRAWING_ELEMENTS = setOf(
+        "BackgroundElement", "BorderModifierNodeElement", "PainterElement", "ShadowGraphicsLayerElement",
+    )
+
     fun read(
         layoutNode: Any,
         density: Float,
@@ -65,7 +70,10 @@ internal object ComposeVisuals {
         for (info in infos) {
             if (info == null) continue
             val element = invoke0(info, "getModifier") ?: continue
-            when (element.javaClass.simpleName) {
+            val name = element.javaClass.simpleName
+            // Inside a layer at alpha 0 nothing is drawn; modifiers before it still are.
+            if (layerAlpha() <= 0f && name in DRAWING_ELEMENTS) continue
+            when (name) {
                 "BackgroundElement" -> {
                     // background(brush, alpha) scales the brush only; the color overload has none.
                     val brushAlpha = (field(element, "alpha") as? Float)?.takeIf { it.isFinite() } ?: 1f
@@ -80,21 +88,30 @@ internal object ComposeVisuals {
                         (brush.javaClass.simpleName == "SolidColor" && solid == null)
                     if (color == null && brushDrawsNothing) continue
                     seenDraw = true
+                    // A brush that draws but whose colors can't be decoded (a ShaderBrush, or a
+                    // gradient whose stops failed to read) is still a visual: its type, no colors.
+                    val opaqueBrush = if (grad == null && solid == null && !brushDrawsNothing) {
+                        GradientInfo(type = brushType(brush) ?: "shader", colors = emptyList(), orientation = null)
+                    } else {
+                        null
+                    }
                     v = v.copy(
                         background = v.background ?: solid,
-                        gradient = v.gradient ?: grad,
+                        gradient = v.gradient ?: grad ?: opaqueBrush,
                         cornerRadius = v.cornerRadius ?: cornerRadius(field(element, "shape"), density, ownBounds(info) ?: nodeBounds),
                         drawBounds = firstDrawBounds(info),
                     )
                 }
                 "BorderModifierNodeElement" -> {
-                    seenDraw = true
                     val width = borderWidthDp(field(element, "width") as? Float, density)
                     val brush = field(element, "brush")
                     val color = solidBrushHex(brush, element, layerAlpha())
                     // A solid border with no color left is a fully transparent one: not drawn.
                     val invisible = color == null && brush?.javaClass?.simpleName == "SolidColor"
-                    if (width != null && !invisible && v.border == null) {
+                    // Only a border that draws sets the inside/outside padding boundary.
+                    if (width == null || invisible) continue
+                    seenDraw = true
+                    if (v.border == null) {
                         v = v.copy(
                             border = BorderInfo(width = width, color = color),
                             cornerRadius = v.cornerRadius ?: cornerRadius(field(element, "shape"), density, ownBounds(info) ?: nodeBounds),
@@ -147,11 +164,12 @@ internal object ComposeVisuals {
                             shape = field(element, "shape"),
                         )
                     } else {
-                        blockLayer(element, density)
+                        blockLayer(element, density, ownBounds(info) ?: nodeBounds)
                     } ?: continue
                     val alpha = layer.alpha?.takeIf { it.isFinite() }?.coerceIn(0f, 1f)
                     if (alpha != null && alpha < 1f) ownAlpha *= alpha
-                    val shadow = layer.shadowPx?.takeIf { it.isFinite() && it > 0f }?.let { it / density }
+                    // A layer's shadow is drawn with the layer's own alpha: none at 0.
+                    val shadow = layer.shadowPx?.takeIf { it.isFinite() && it > 0f && layerAlpha() > 0f }?.let { it / density }
                     if (shadow != null) seenDraw = true
                     v = v.copy(
                         alpha = if (ownAlpha < 1f) ownAlpha else v.alpha,
@@ -225,6 +243,11 @@ internal object ComposeVisuals {
             java.lang.Float.intBitsToFloat((packed ushr 32).toInt()),
             java.lang.Float.intBitsToFloat((packed and 0xFFFFFFFFL).toInt()),
         )
+
+    /** Compose packs a Size like an Offset: width in the high 32 bits, height in the low. */
+    fun packSize(width: Float, height: Float): Long =
+        (java.lang.Float.floatToRawIntBits(width).toLong() shl 32) or
+            (java.lang.Float.floatToRawIntBits(height).toLong() and 0xFFFFFFFFL)
 
     /** Names match GradientDrawable.Orientation, lowercased, as the View path reports them. */
     fun gradientOrientation(start: Pair<Float, Float>, end: Pair<Float, Float>): String? {
@@ -397,7 +420,7 @@ internal object ComposeVisuals {
      * fresh ReusableGraphicsLayerScope with the screen density (so `8.dp.toPx()` resolves as
      * it does on screen). Null when any of that is unavailable in this Compose release.
      */
-    private fun blockLayer(element: Any, density: Float): LayerProps? {
+    private fun blockLayer(element: Any, density: Float, layerBounds: Bounds?): LayerProps? {
         val block = (field(element, "block") ?: field(element, "layerBlock")) as? Function1<*, *> ?: return null
         return try {
             val loader = element.javaClass.classLoader
@@ -411,6 +434,13 @@ internal object ComposeVisuals {
                 scopeClass.methods
                     .firstOrNull { it.name.startsWith("setGraphicsDensity") && it.parameterCount == 1 }
                     ?.invoke(scope, densityObj)
+            }
+            // Compose sets the layer's measured size before running the block; a block that
+            // reads `size` must see the same value here.
+            if (layerBounds != null) {
+                scopeClass.methods
+                    .firstOrNull { it.name.startsWith("setSize") && it.parameterCount == 1 }
+                    ?.invoke(scope, packSize(layerBounds.w.toFloat(), layerBounds.h.toFloat()))
             }
             @Suppress("UNCHECKED_CAST")
             (block as Function1<Any?, Any?>).invoke(scope)
@@ -462,14 +492,15 @@ internal object ComposeVisuals {
         return (field(brush, "value") as? Long)?.let { colorHex(anchor, it, alpha = alpha) }
     }
 
+    private fun brushType(brush: Any?): String? = when (brush?.javaClass?.simpleName) {
+        "LinearGradient" -> "linear"
+        "RadialGradient" -> "radial"
+        "SweepGradient" -> "sweep"
+        else -> null
+    }
+
     private fun gradient(brush: Any?, anchor: Any, alpha: Float = 1f): GradientInfo? {
-        val name = brush?.javaClass?.simpleName ?: return null
-        val type = when (name) {
-            "LinearGradient" -> "linear"
-            "RadialGradient" -> "radial"
-            "SweepGradient" -> "sweep"
-            else -> return null
-        }
+        val type = brushType(brush) ?: return null
         val colors = (field(brush, "colors") as? List<*>)?.mapNotNull { c ->
             val packed = c?.javaClass?.methods?.firstOrNull { it.name == "unbox-impl" }?.invoke(c) as? Long
             // A transparent stop is still a stop: Compose hands every color to the shader,

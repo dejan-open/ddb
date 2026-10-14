@@ -501,12 +501,16 @@ object ViewTreeWalker {
         val bounds = coords?.let { ComposeVisuals.boundsInWindow(it) }
         val visuals = ComposeVisuals.read(node, density, fontScale, resources, bounds, inheritedAlpha)
         val subtreeAlpha = inheritedAlpha * (visuals.alpha ?: 1f)
-        if (subtreeAlpha <= 0f) {
+        // A layer at alpha 0 hides the node's content and its subtree, but whatever the node
+        // draws before that layer (background(Red).graphicsLayer(alpha = 0f)) stays on screen:
+        // emit only that, as a plain container with no semantics, and stop.
+        val hidden = subtreeAlpha <= 0f
+        if (hidden && !visuals.draws) {
             log.appendLine("COMPOSE_SKIP hidden alpha=0 bounds=$bounds")
             return
         }
 
-        val config = (ComposeVisuals.invokeInternal(node, "getSemanticsId") as? Int)?.let { configs[it] }
+        val config = if (hidden) null else (ComposeVisuals.invokeInternal(node, "getSemanticsId") as? Int)?.let { configs[it] }
         val text = extractSemanticsText(config)
         val contentDesc = extractSemanticsContentDesc(config)
         val role = extractSemanticsRole(config)
@@ -553,6 +557,7 @@ object ViewTreeWalker {
             )
             log.appendLine("COMPOSE_EMIT z=$z type=$type bounds=$elementBounds bg=${visuals.background} img=${visuals.imageType} content=${content?.take(30) ?: "null"}")
         }
+        if (hidden) return
 
         // LayoutNode.children is internal, so its getter is name-mangled
         // (getChildren$ui); getChildrenInfo is the public fallback.

@@ -101,6 +101,12 @@ class ComposeVisualsTest {
     }
 
     @Test
+    fun size_packs_like_an_offset() {
+        assertEquals(Pair(1080f, 2400f), ComposeVisuals.unpackOffset(ComposeVisuals.packSize(1080f, 2400f)))
+        assertEquals(pack(12.5f, 3f), ComposeVisuals.packSize(12.5f, 3f))
+    }
+
+    @Test
     fun field_reads_private_backing_fields_through_superclasses() {
         open class Base(private val shape: String)
         class Element(private val brush: String) : Base("rounded")
