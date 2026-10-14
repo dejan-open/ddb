@@ -640,9 +640,11 @@ object ViewTreeWalker {
      * is drawn, there, with the padding outside it as its margin. A node that takes touches
      * itself ([touchable]: its own click, or an input) and has no margin still takes them over
      * its whole box (a Material button's 48 dp touch area around its 40 dp shape), which is then
-     * its tap target. A margin is padding, and a click covers the box inside the padding that
-     * comes before it in the chain ([clickBounds]): the whole box for clickable { }.padding(8.dp),
-     * the box inside the outer 4 dp for padding(4.dp).clickable { }.padding(8.dp). That box is the
+     * its tap target. A click covers the box of the coordinator it is attached to, which every
+     * layout modifier before it shapes ([clickBounds]): the whole box for
+     * clickable { }.padding(8.dp), the box inside the outer 4 dp for
+     * padding(4.dp).clickable { }.padding(8.dp), the inner 40 dp for
+     * size(96.dp).wrapContentSize().clickable { }.size(40.dp). That box is the
      * tap target when it differs from the drawn one; for padding(8.dp).clickable { } it is the
      * drawn box, and there is none. With no draw bounds the whole box is reported,
      * with no margin, so no stretch of screen is counted both as the element and as its margin.
@@ -1311,16 +1313,19 @@ object ViewTreeWalker {
         val fill = gradientFill(drawable, tint)
         val border = gradientBorder(drawable, density, tint)
         val gradient = gradientInfo(drawable, tint)
+        // A shape with no visible fill, gradient or stroke puts no pixels on screen, so its
+        // corners round nothing; a transparent fill with a visible stroke still has them.
+        val draws = fill != null || gradient != null || border != null
         return when (drawable.shape) {
             GradientDrawable.OVAL -> DrawnBackground(
                 fill = fill,
-                cornerRadiusPx = rect?.let { minOf(it.first, it.second) / 2f }?.takeIf { it > 0f },
+                cornerRadiusPx = rect?.let { minOf(it.first, it.second) / 2f }?.takeIf { it > 0f && draws },
                 border = border,
                 gradient = gradient,
             )
             GradientDrawable.LINE -> DrawnBackground(customDraw = border != null)
-            GradientDrawable.RING -> DrawnBackground(customDraw = fill != null || gradient != null || border != null)
-            else -> DrawnBackground(fill, gradientCornerRadius(drawable, rect), border, gradient)
+            GradientDrawable.RING -> DrawnBackground(customDraw = draws)
+            else -> DrawnBackground(fill, if (draws) gradientCornerRadius(drawable, rect) else null, border, gradient)
         }
     }
 

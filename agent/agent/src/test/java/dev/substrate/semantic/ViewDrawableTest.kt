@@ -226,7 +226,7 @@ class ViewDrawableTest {
     fun a_gradient_corner_radius_is_clamped_to_the_rect_it_draws() {
         // A 48 px tall pill with <corners android:radius="100dp"/>: GradientDrawable draws half the
         // height, 24, not 100.
-        val pill = GradientDrawable().apply { cornerRadius = 100f }
+        val pill = GradientDrawable().apply { setColor(Color.RED); cornerRadius = 100f }
         assertEquals(24f, background(sized(pill, 200, 48))!!.cornerRadiusPx!!, 0f)
         // Its own bounds, once set, are what it draws in, inset by half the stroke on each side.
         pill.setBounds(0, 0, 100, 40)
@@ -234,7 +234,8 @@ class ViewDrawableTest {
         pill.setStroke(4, Color.BLACK)
         assertEquals(18f, ViewTreeWalker.gradientCornerRadius(pill)!!, 0f)
         // A radius that fits is kept.
-        assertEquals(8f, background(sized(GradientDrawable().apply { cornerRadius = 8f }, 200, 48))!!.cornerRadiusPx!!, 0f)
+        val fits = GradientDrawable().apply { setColor(Color.RED); cornerRadius = 8f }
+        assertEquals(8f, background(sized(fits, 200, 48))!!.cornerRadiusPx!!, 0f)
         // Per-corner radii that overrun a side are all scaled by one factor (SkRRect): here the left
         // side's 30 + 30 in 40 px, so every radius is two thirds of its own.
         val overrun = GradientDrawable().apply {
@@ -247,6 +248,28 @@ class ViewDrawableTest {
         // A corner with one radius at 0 is square, and its other radius takes no part in the scale.
         assertNull(ViewTreeWalker.radiiTopLeft(floatArrayOf(30f, 0f, 0f, 0f, 0f, 0f, 0f, 0f), Pair(100f, 40f)))
         assertEquals(10f, ViewTreeWalker.radiiTopLeft(floatArrayOf(10f, 10f, 0f, 0f, 0f, 0f, 0f, 90f), Pair(100f, 40f))!!, 0f)
+    }
+
+    @Test
+    fun a_rounded_shape_has_a_corner_radius_only_when_it_draws() {
+        // setColor(Color.TRANSPARENT) with rounded corners: no pixels, so no corner radius.
+        val clear = background(sized(GradientDrawable().apply { setColor(Color.TRANSPARENT); cornerRadius = 8f }))!!
+        assertNull(clear.fill)
+        assertNull(clear.border)
+        assertNull(clear.cornerRadiusPx)
+        // The same as a transparent oval.
+        val clearOval = GradientDrawable().apply { shape = GradientDrawable.OVAL; setColor(Color.TRANSPARENT) }
+        assertNull(background(sized(clearOval, 48, 48))!!.cornerRadiusPx)
+        // A transparent fill with a visible stroke draws the rounded outline: it keeps its radius.
+        val outline = GradientDrawable().apply {
+            setColor(Color.TRANSPARENT)
+            cornerRadius = 8f
+            setStroke(2, Color.BLUE)
+        }
+        val drawn = background(sized(outline))!!
+        assertNull(drawn.fill)
+        assertEquals(BorderInfo(2f, "#0000FF"), drawn.border)
+        assertEquals(8f, drawn.cornerRadiusPx!!, 0f)
     }
 
     @Test

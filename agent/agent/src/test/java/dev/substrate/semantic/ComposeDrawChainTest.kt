@@ -635,11 +635,57 @@ class ComposeDrawChainTest {
     // Modifier.clickable { }: the element that gives the node its click.
     class ClickableElement
 
-    private fun clickAndPadding(vararg first: Any): ComposeDrawInfo = readSized(
-        Bounds(0, 0, 64, 64), 1f,
-        *first.map { SizedInfo(it, placed(0, 0, 64)) }.toTypedArray(),
-        SizedInfo(BackgroundElement(red, Any()), placed(8, 8, 48)),
-    )
+    // A modifier is attached to the coordinator of the next layout modifier inward: one before
+    // the padding sits on the padding's 64 dp box, one after it on the 48 dp box inside.
+    private fun clickAndPadding(vararg first: Any): ComposeDrawInfo {
+        val padAt = first.indexOfFirst { it is PaddingElement }
+        return readSized(
+            Bounds(0, 0, 64, 64), 1f,
+            *first.mapIndexed { i, e -> SizedInfo(e, if (i <= padAt) placed(0, 0, 64) else placed(8, 8, 48)) }.toTypedArray(),
+            SizedInfo(BackgroundElement(red, Any()), placed(8, 8, 48)),
+        )
+    }
+
+    // Layout modifiers the reader doesn't read: size and wrapContentSize.
+    class SizeElement
+    class WrapContentElement
+
+    @Test
+    fun a_click_inside_a_smaller_layout_box_taps_that_box_only() {
+        // Modifier.size(96.dp).wrapContentSize().clickable { }.size(40.dp).background(Red): the
+        // click is attached to the centred 40 dp box, which is also the drawn box, so the rest of
+        // the 96 dp node is no tap target.
+        val node = Bounds(0, 0, 96, 96)
+        val inner = Bounds(28, 28, 40, 40)
+        val v = readSized(
+            node, 1f,
+            SizedInfo(SizeElement(), placed(0, 0, 96)),
+            SizedInfo(WrapContentElement(), placed(0, 0, 96)),
+            SizedInfo(ClickableElement(), placed(28, 28, 40)),
+            SizedInfo(SizeElement(), placed(28, 28, 40)),
+            SizedInfo(BackgroundElement(red, Any()), placed(28, 28, 40)),
+        )
+        assertEquals(inner, v.clickBounds)
+        assertEquals(inner, v.drawBounds)
+        assertEquals(
+            ViewTreeWalker.ComposeBox(inner, null),
+            ViewTreeWalker.composeBox(true, node, v.drawBounds, v.margin, v.clickBounds),
+        )
+        // Material 3's Surface(onClick = …) puts the click after minimumInteractiveComponentSize():
+        // Compose's minimum touch target makes the whole 48 dp box it grew tappable.
+        val surfaceNode = Bounds(0, 0, 48, 48)
+        val surface = readSized(
+            surfaceNode, 1f,
+            SizedInfo(MinimumInteractiveModifier(), placed(0, 0, 48)),
+            SizedInfo(BackgroundElement(red, Any()), placed(4, 4, 40)),
+            SizedInfo(ClickableElement(), placed(4, 4, 40)),
+        )
+        assertEquals(surfaceNode, surface.clickBounds)
+        assertEquals(
+            ViewTreeWalker.ComposeBox(Bounds(4, 4, 40, 40), null, tapTarget = surfaceNode),
+            ViewTreeWalker.composeBox(true, surfaceNode, surface.drawBounds, surface.margin, surface.clickBounds),
+        )
+    }
 
     @Test
     fun a_click_outside_the_padding_taps_the_whole_box_margin_included() {
