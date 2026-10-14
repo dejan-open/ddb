@@ -1581,11 +1581,7 @@ class SemanticServer private constructor(
             }
             e.lineCount?.let { sb.appendLine("  line_count: $it") }
             e.truncated?.let { sb.appendLine("  truncated: $it") }
-            if (e.imageResource != null) {
-                sb.appendLine("  image:")
-                sb.appendLine("    resource: \"${e.imageResource}\"")
-                sb.appendLine("    type: ${e.imageType ?: "raster"}")
-            }
+            imageYaml(e.imageResource, e.imageType).forEach { sb.appendLine(it) }
             e.imagePath?.let { sb.appendLine("  image_path: \"$it\"") }
             e.elevation?.let { sb.appendLine("  elevation: $it") }
             e.render?.let { sb.appendLine("  render: $it") }
@@ -1613,6 +1609,19 @@ class SemanticServer private constructor(
 
     companion object {
         private var instance: SemanticServer? = null
+
+        /**
+         * The `image:` block of an element, or no lines when it is not an image. `type` is
+         * written only when the format is known: a Compose node that is an image by
+         * Role.Image alone (a Canvas, custom drawing) has none, and a fallback here would
+         * report a format nothing observed.
+         */
+        internal fun imageYaml(resource: String?, type: String?): List<String> {
+            if (resource == null) return emptyList()
+            val lines = mutableListOf("  image:", "    resource: \"$resource\"")
+            if (type != null) lines.add("    type: $type")
+            return lines
+        }
 
         // TD-97: max ms to wait for SemanticAgent.loginHandler during
         // cold-init race. Override with SEMANTIC_HANDLER_WAIT_MS for tests.

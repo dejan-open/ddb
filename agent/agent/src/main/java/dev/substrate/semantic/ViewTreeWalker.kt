@@ -239,7 +239,7 @@ object ViewTreeWalker {
         )
     }
 
-    private fun removeGhostTouchTargets(
+    internal fun removeGhostTouchTargets(
         elements: MutableList<SemanticElement>,
         log: StringBuilder,
     ) {
@@ -249,10 +249,9 @@ object ViewTreeWalker {
             if (!a.clickable) continue
             if (a.type != "button" && a.type != "view") continue
             if (!a.content.isNullOrEmpty()) continue
-            // A touch target that draws something (an outlined button, a
-            // gradient pill, an icon, a shadow) is a real element, not a ghost.
-            if (a.background != null || a.border != null || a.gradient != null || a.imageType != null) continue
-            if ((a.elevation ?: 0f) > 0f) continue
+            // A touch target that draws something (an outlined button, a gradient pill, an
+            // icon of any format, a shadow, a custom draw) is a real element, not a ghost.
+            if (a.drawsSomething) continue
 
             for (j in elements.indices) {
                 if (i == j) continue
@@ -573,6 +572,7 @@ object ViewTreeWalker {
                     imageType = image.imageType,
                     imagePath = null,
                     border = visuals.border, gradient = visuals.gradient, tapTarget = null,
+                    customDraw = visuals.customDraw,
                 ),
             )
             log.appendLine("COMPOSE_EMIT z=$z type=$type bounds=$elementBounds bg=${visuals.background} img=${visuals.imageType} content=${content?.take(30) ?: "null"}")

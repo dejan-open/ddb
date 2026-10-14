@@ -201,11 +201,15 @@ class ComposeVisualsTest {
     }
 
     @Test
-    fun drawBehind_is_a_custom_draw_and_counts_as_a_visual() {
+    fun every_arbitrary_draw_modifier_is_a_custom_draw_and_counts_as_a_visual() {
         // A Compose Canvas is a Spacer with Modifier.drawBehind: nothing else marks it as drawn.
         assertTrue(ComposeVisuals.isCustomDraw("DrawBehindElement"))
-        assertFalse(ComposeVisuals.isCustomDraw("DrawWithContentElement"))
+        // drawWithContent { drawRect(...); drawContent() } and drawWithCache { onDrawBehind { } }
+        // run arbitrary draw lambdas too.
+        assertTrue(ComposeVisuals.isCustomDraw("DrawWithContentElement"))
+        assertTrue(ComposeVisuals.isCustomDraw("DrawWithCacheElement"))
         assertFalse(ComposeVisuals.isCustomDraw("PaddingElement"))
+        assertFalse(ComposeVisuals.isCustomDraw("GraphicsLayerElement"))
         assertFalse(ComposeDrawInfo().draws)
         assertTrue(ComposeDrawInfo(customDraw = true).draws)
     }

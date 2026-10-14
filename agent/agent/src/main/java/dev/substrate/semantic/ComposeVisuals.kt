@@ -26,8 +26,9 @@ internal data class ComposeDrawInfo(
     val textColor: String? = null,
     val maxLines: Int? = null,
     /**
-     * The node draws through a custom draw modifier (drawBehind; a Compose Canvas is a Spacer
-     * with one). What it draws can't be read, but it is on screen like any other visual.
+     * The node draws through a custom draw modifier (drawBehind, drawWithContent or
+     * drawWithCache; a Compose Canvas is a Spacer with drawBehind). What it draws can't be
+     * read, but it is on screen like any other visual.
      */
     val customDraw: Boolean = false,
     /** Bounds of the first drawing modifier, when it differs from the node's (an outer padding). */
@@ -45,15 +46,19 @@ internal object ComposeVisuals {
     /** Elements that put pixels on screen (a layer at alpha 0 hides those after it). */
     private val DRAWING_ELEMENTS = setOf(
         "BackgroundElement", "BorderModifierNodeElement", "PainterElement", "ShadowGraphicsLayerElement",
-        "DrawBehindElement",
+        "DrawBehindElement", "DrawWithContentElement", "DrawWithCacheElement",
     )
 
     /**
-     * Modifiers that draw arbitrary content and have no fields to decode: Modifier.drawBehind,
-     * which a Compose Canvas is built on. drawWithContent and drawWithCache are left out, since
-     * they often only wrap drawContent() and draw nothing of their own.
+     * Modifiers that run an arbitrary draw lambda and have no fields to decode:
+     * Modifier.drawBehind (which a Compose Canvas is built on), Modifier.drawWithContent and
+     * Modifier.drawWithCache. Whether the lambda puts pixels on screen can't be read through
+     * reflection, so each one counts as a draw: it marks the node as drawn, sets the
+     * padding/margin boundary and is hidden by an alpha-0 layer before it, like a background.
+     * A lambda that only calls drawContent() costs at most a plain container in the capture;
+     * dropping a node that does draw would lose it entirely.
      */
-    private val CUSTOM_DRAW_ELEMENTS = setOf("DrawBehindElement")
+    private val CUSTOM_DRAW_ELEMENTS = setOf("DrawBehindElement", "DrawWithContentElement", "DrawWithCacheElement")
 
     /** Whether a modifier, known by its element class name, is a custom draw. */
     fun isCustomDraw(elementName: String): Boolean = elementName in CUSTOM_DRAW_ELEMENTS

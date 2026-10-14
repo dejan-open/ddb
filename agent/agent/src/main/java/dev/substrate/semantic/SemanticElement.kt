@@ -28,7 +28,22 @@ data class SemanticElement(
     val border: BorderInfo? = null,
     val gradient: GradientInfo? = null,
     val tapTarget: Bounds? = null,
-)
+    /**
+     * The element draws through a custom draw modifier (Compose drawBehind, drawWithContent,
+     * drawWithCache, a Canvas) whose output the fields above can't describe. Not serialized;
+     * it keeps the element from being taken for an empty ghost touch target.
+     */
+    val customDraw: Boolean = false,
+) {
+    /**
+     * Whether the element puts pixels of its own on screen: a background, border, gradient,
+     * image (format known or not), shadow or custom draw.
+     */
+    val drawsSomething: Boolean
+        get() = background != null || border != null || gradient != null ||
+            imageResource != null || imageType != null || imagePath != null ||
+            (elevation ?: 0f) > 0f || customDraw
+}
 
 data class Bounds(
     val x: Int,
