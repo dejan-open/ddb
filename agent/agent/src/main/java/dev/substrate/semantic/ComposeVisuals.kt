@@ -48,6 +48,14 @@ internal object ComposeVisuals {
         var outerPad: FloatArray? = null
         var innerPad: FloatArray? = null
         var seenDraw = false
+        // The first drawing modifier owns the draw bounds, even when they equal the node's
+        // (recorded as null): a later modifier inside padding must not replace them.
+        var drawBoundsTaken = false
+        fun firstDrawBounds(info: Any): Bounds? {
+            if (drawBoundsTaken) return v.drawBounds
+            drawBoundsTaken = true
+            return modifierBounds(info, nodeBounds)
+        }
         for (info in infos) {
             if (info == null) continue
             val element = invoke0(info, "getModifier") ?: continue
@@ -62,7 +70,7 @@ internal object ComposeVisuals {
                         background = v.background ?: solid,
                         gradient = v.gradient ?: grad,
                         cornerRadius = v.cornerRadius ?: cornerRadius(field(element, "shape"), density, ownBounds(info) ?: nodeBounds),
-                        drawBounds = v.drawBounds ?: modifierBounds(info, nodeBounds),
+                        drawBounds = firstDrawBounds(info),
                     )
                 }
                 "BorderModifierNodeElement" -> {
@@ -76,7 +84,7 @@ internal object ComposeVisuals {
                         v = v.copy(
                             border = BorderInfo(width = width, color = color),
                             cornerRadius = v.cornerRadius ?: cornerRadius(field(element, "shape"), density, ownBounds(info) ?: nodeBounds),
-                            drawBounds = v.drawBounds ?: modifierBounds(info, nodeBounds),
+                            drawBounds = firstDrawBounds(info),
                         )
                     }
                 }
@@ -88,7 +96,7 @@ internal object ComposeVisuals {
                         v = v.copy(
                             imageType = type,
                             imageTint = colorFilterHex(field(element, "colorFilter"), element),
-                            drawBounds = v.drawBounds ?: modifierBounds(info, nodeBounds),
+                            drawBounds = firstDrawBounds(info),
                         )
                     } else if (painter?.javaClass?.simpleName == "ColorPainter" && v.background == null) {
                         // ColorPainter fills its bounds with one color: that is a background, not an image.
@@ -96,7 +104,7 @@ internal object ComposeVisuals {
                         if (fill != null) {
                             v = v.copy(
                                 background = fill,
-                                drawBounds = v.drawBounds ?: modifierBounds(info, nodeBounds),
+                                drawBounds = firstDrawBounds(info),
                             )
                         }
                     }

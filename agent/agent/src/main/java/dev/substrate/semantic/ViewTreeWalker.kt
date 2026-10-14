@@ -250,8 +250,9 @@ object ViewTreeWalker {
             if (a.type != "button" && a.type != "view") continue
             if (!a.content.isNullOrEmpty()) continue
             // A touch target that draws something (an outlined button, a
-            // gradient pill, an icon) is a real element, not a ghost.
+            // gradient pill, an icon, a shadow) is a real element, not a ghost.
             if (a.background != null || a.border != null || a.gradient != null || a.imageType != null) continue
+            if ((a.elevation ?: 0f) > 0f) continue
 
             for (j in elements.indices) {
                 if (i == j) continue
