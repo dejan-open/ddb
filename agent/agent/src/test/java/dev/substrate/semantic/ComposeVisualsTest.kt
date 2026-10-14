@@ -62,11 +62,41 @@ class ComposeVisualsTest {
 
     @Test
     fun hairline_border_is_one_physical_pixel() {
-        assertEquals(1f / 2.625f, ComposeVisuals.borderWidthDp(0f, 2.625f)!!, 1e-6f)
-        assertEquals(2f, ComposeVisuals.borderWidthDp(2f, 3f)!!, 0f)
-        assertNull(ComposeVisuals.borderWidthDp(-1f, 3f))
-        assertNull(ComposeVisuals.borderWidthDp(Float.NaN, 3f))
-        assertNull(ComposeVisuals.borderWidthDp(null, 3f))
+        assertEquals(1f / 2.625f, ComposeVisuals.borderWidthDp(0f, 2.625f, null)!!, 1e-6f)
+        assertEquals(1f / 2.625f, ComposeVisuals.borderWidthDp(0f, 2.625f, Pair(105, 105))!!, 1e-6f)
+        assertEquals(2f, ComposeVisuals.borderWidthDp(2f, 3f, null)!!, 0f)
+        assertNull(ComposeVisuals.borderWidthDp(-1f, 3f, null))
+        assertNull(ComposeVisuals.borderWidthDp(Float.NaN, 3f, null))
+        assertNull(ComposeVisuals.borderWidthDp(null, 3f, null))
+    }
+
+    @Test
+    fun border_width_rounds_up_to_whole_pixels() {
+        // border(1.dp) at density 2.625 strokes ceil(2.625) = 3 px.
+        assertEquals(3f / 2.625f, ComposeVisuals.borderWidthDp(1f, 2.625f, null)!!, 1e-6f)
+        assertEquals(3f / 2.625f, ComposeVisuals.borderWidthDp(1f, 2.625f, Pair(262, 105))!!, 1e-6f)
+        // border(0.5.dp) at density 3 is 1.5 px, drawn as 2.
+        assertEquals(2f / 3f, ComposeVisuals.borderWidthDp(0.5f, 3f, null)!!, 1e-6f)
+        // A width that is already whole pixels is reported as is.
+        assertEquals(2f, ComposeVisuals.borderWidthDp(2f, 2f, Pair(200, 80))!!, 0f)
+    }
+
+    @Test
+    fun border_wider_than_half_the_smaller_side_is_clamped_to_it() {
+        // border(100.dp) on a 100x40 dp node at density 2: half of 80 px is 40 px, so 20 dp.
+        assertEquals(20f, ComposeVisuals.borderWidthDp(100f, 2f, Pair(200, 80))!!, 0f)
+        // Half an odd side rounds up: ceil(41 / 2) = 21 px.
+        assertEquals(21f, ComposeVisuals.borderWidthDp(100f, 1f, Pair(41, 100))!!, 0f)
+        // No measured size: nothing to clamp against.
+        assertEquals(100f, ComposeVisuals.borderWidthDp(100f, 1f, null)!!, 0f)
+        // A node with an empty side draws its content only, no border.
+        assertNull(ComposeVisuals.borderWidthDp(2f, 2f, Pair(0, 80)))
+    }
+
+    @Test
+    fun border_width_without_a_density_is_the_declared_width() {
+        assertEquals(2f, ComposeVisuals.borderWidthDp(2f, Float.NaN, Pair(10, 10))!!, 0f)
+        assertNull(ComposeVisuals.borderWidthDp(0f, 0f, null))
     }
 
     @Test
@@ -333,6 +363,43 @@ class ComposeVisualsTest {
             ComposeVisuals.overWholeText<ComposeVisuals.TextForeground?>(black, 3, spans.toList())
         assertEquals(ComposeVisuals.OverText.Uniform(ComposeVisuals.TextForeground.Solid(red)), over(ComposeVisuals.SpanEffect(0, 3, redSpan)))
         assertEquals(ComposeVisuals.OverText.Mixed, over(ComposeVisuals.SpanEffect(0, 1, redSpan)))
+    }
+
+    // Brushes with Compose's class names and backing field.
+    class SolidColor(private val value: Long)
+    class ShaderBrush
+    class LinearGradient
+
+    @Test
+    fun a_solid_text_brush_is_a_color_and_only_a_shader_brush_is_a_shader() {
+        val red = 0xFFFF0000L shl 32
+        // AndroidTextPaint.setBrush draws a SolidColor as the paint color, at the brush alpha.
+        assertEquals(ComposeVisuals.TextForeground.Solid(red, 0.5f), ComposeVisuals.brushForeground(SolidColor(red), 0.5f))
+        for (shader in listOf(ShaderBrush(), LinearGradient())) {
+            assertEquals(ComposeVisuals.TextForeground.Shader(shader, 0.5f), ComposeVisuals.brushForeground(shader, 0.5f))
+        }
+        // A solid brush with no color to read is a color, but an unknown one.
+        assertNull(ComposeVisuals.brushForeground(SolidColor(ComposeVisuals.UNSPECIFIED_COLOR), 1f))
+    }
+
+    @Test
+    fun a_solid_span_brush_is_a_color_span() {
+        val red = 0xFFFF0000L shl 32
+        val blue = 0xFF0000FFL shl 32
+        val shader = ComposeVisuals.TextForeground.Shader(ShaderBrush(), 1f)
+        // A text drawn in a solid red brush (at half alpha) takes a solid blue span brush's own color.
+        val blueBrushSpan = ComposeVisuals.foregroundEffect(null, SolidColor(blue), 0.5f)!!
+        assertEquals(ComposeVisuals.TextForeground.Solid(blue), blueBrushSpan(ComposeVisuals.TextForeground.Solid(red, 0.5f)))
+        assertEquals(ComposeVisuals.TextForeground.Solid(blue), blueBrushSpan(null))
+        // Like a color span, it leaves a shader under it drawing; a shader span replaces anything.
+        assertEquals(shader, blueBrushSpan(shader))
+        val gradient = LinearGradient()
+        val gradientSpan = ComposeVisuals.foregroundEffect(null, gradient, 0.5f)!!
+        assertEquals(ComposeVisuals.TextForeground.Shader(gradient, 0.5f), gradientSpan(ComposeVisuals.TextForeground.Solid(red)))
+        // A solid span brush whose color can't be read leaves the color unknown, a shader under it drawing.
+        val unread = ComposeVisuals.foregroundEffect(null, SolidColor(ComposeVisuals.UNSPECIFIED_COLOR), 1f)!!
+        assertNull(unread(ComposeVisuals.TextForeground.Solid(red)))
+        assertEquals(shader, unread(shader))
     }
 
     @Test

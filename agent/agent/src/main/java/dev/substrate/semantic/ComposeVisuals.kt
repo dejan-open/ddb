@@ -158,7 +158,9 @@ internal object ComposeVisuals {
                     )
                 }
                 "BorderModifierNodeElement" -> {
-                    val width = borderWidthDp(field(element, "width") as? Float, density)
+                    // The stroke Compose draws: rounded up to whole pixels and clamped to half the
+                    // smaller side of the size the modifier draws at.
+                    val width = borderWidthDp(field(element, "width") as? Float, density, measuredSize(info, nodeBounds))
                     val brush = field(element, "brush")
                     val color = solidBrushHex(brush, element, layerAlpha())
                     // A solid border with no color left is a fully transparent one: not drawn.
@@ -403,13 +405,22 @@ internal object ComposeVisuals {
         if (!keepTransparent && (argb ushr 24) == 0) null else argbToHex(argb)
 
     /**
-     * Border width in dp. `Dp.Hairline` is stored as 0 and Compose draws it as one physical
-     * pixel, so 0 reports one pixel in dp rather than "no border".
+     * Border width in dp as Compose draws it. BorderModifierNode strokes
+     * `min(ceil(width.toPx()), ceil(size.minDimension / 2))` px, where `Dp.Hairline` (stored as
+     * 0) is one physical pixel: a fractional width rounds up to whole pixels, and one wider than
+     * half the smaller side is clamped to it. [size] is the size the modifier draws at in px (the
+     * measured size, null when unknown: no clamp), and with an empty side no border is drawn.
+     * Null when the width can't be read or nothing is drawn.
      */
-    fun borderWidthDp(width: Float?, density: Float): Float? = when {
-        width == null || !width.isFinite() || width < 0f -> null
-        width == 0f -> if (density.isFinite() && density > 0f) 1f / density else null
-        else -> width
+    fun borderWidthDp(width: Float?, density: Float, size: Pair<Int, Int>?): Float? {
+        if (width == null || !width.isFinite() || width < 0f) return null
+        // With no density there are no pixels to round to: the declared width, or none for a hairline.
+        if (!density.isFinite() || density <= 0f) return width.takeIf { it > 0f }
+        val minSide = size?.let { minOf(it.first, it.second) }
+        if (minSide != null && minSide <= 0) return null
+        val requestedPx = if (width == 0f) 1f else kotlin.math.ceil(width * density)
+        val px = if (minSide == null) requestedPx else minOf(requestedPx, kotlin.math.ceil(minSide / 2f))
+        return px / density
     }
 
     fun argbToHex(color: Int): String {
@@ -525,23 +536,45 @@ internal object ComposeVisuals {
         return result ?: OverText.Uniform(base)
     }
 
-    /** What text is drawn with: one color, or a brush (a shader) with its alpha. */
+    /** What text is drawn with: one color at an alpha, or a shader brush with its alpha. */
     sealed class TextForeground {
-        data class Solid(val packed: Long) : TextForeground()
+        data class Solid(val packed: Long, val alpha: Float = 1f) : TextForeground()
         data class Shader(val brush: Any, val alpha: Float) : TextForeground()
     }
 
     /**
-     * What a span's color or brush does to the text's foreground. A brush span sets the paint's
-     * shader, which replaces whatever was under it. A color span sets the paint's color, which a
-     * shader under it still draws over, so it changes only a solid (or unread) foreground. Null
-     * when the span sets neither.
+     * A text brush as Compose draws it. Only a ShaderBrush (a gradient, or any other shader) sets
+     * the paint's shader. A SolidColor is a color: AndroidTextPaint.setBrush sets the paint's
+     * color from it at [alpha]. Null for a SolidColor whose color can't be read: a color, but an
+     * unknown one.
      */
-    fun foregroundEffect(color: Long?, brush: Any?, alpha: Float): ((TextForeground?) -> TextForeground?)? = when {
-        brush != null -> { _ -> TextForeground.Shader(brush, alpha) }
-        color != null && color != UNSPECIFIED_COLOR -> { under -> under as? TextForeground.Shader ?: TextForeground.Solid(color) }
-        else -> null
+    fun brushForeground(brush: Any, alpha: Float): TextForeground? =
+        if (brush.javaClass.simpleName == "SolidColor") {
+            (field(brush, "value") as? Long)?.takeIf { it != UNSPECIFIED_COLOR }?.let { TextForeground.Solid(it, alpha) }
+        } else {
+            TextForeground.Shader(brush, alpha)
+        }
+
+    /**
+     * What a span's color or brush does to the text's foreground. A shader brush span sets the
+     * paint's shader, which replaces whatever was under it. A color span sets the paint's color,
+     * which a shader under it still draws over, so it changes only a solid (or unread)
+     * foreground. Compose applies a span's SolidColor brush as such a color span, with the
+     * brush's own color (the span alpha is not applied to it). Null when the span sets neither.
+     */
+    fun foregroundEffect(color: Long?, brush: Any?, alpha: Float): ((TextForeground?) -> TextForeground?)? {
+        if (brush != null) {
+            val fg = brushForeground(brush, alpha)
+            if (fg is TextForeground.Shader) return { _ -> fg }
+            return colorSpan((fg as? TextForeground.Solid)?.let { TextForeground.Solid(it.packed) })
+        }
+        if (color == null || color == UNSPECIFIED_COLOR) return null
+        return colorSpan(TextForeground.Solid(color))
     }
+
+    /** A color span over a foreground: a shader under it keeps drawing, anything else takes [solid] (null: unread). */
+    private fun colorSpan(solid: TextForeground.Solid?): (TextForeground?) -> TextForeground? =
+        { under -> under as? TextForeground.Shader ?: solid }
 
     /**
      * A text's span styles: its length, and each span's range and SpanStyle. A plain String, or
@@ -682,10 +715,11 @@ internal object ComposeVisuals {
     private fun textColorHex(producer: Any?, style: Any?, spans: TextSpans, anchor: Any, alpha: Float): String? {
         // A TextStyle brush wins over the color producer and the style color, as in
         // Compose's text draw; without one the paint takes the producer, the style's color,
-        // then black. Span colors and brushes then draw over that.
+        // then black. Span colors and brushes then draw over that. A solid brush is drawn as
+        // its color, so a color span over it replaces it.
         val styleBrush = style?.let { invokePrefix(it, "getBrush") }
         val base = if (styleBrush != null) {
-            TextForeground.Shader(styleBrush, brushAlpha(style))
+            brushForeground(styleBrush, brushAlpha(style))
         } else {
             val stylePacked = style?.let { invokePrefix(it, "getColor") as? Long }
             textColorPacked(producer != null, producerPacked(producer), stylePacked)?.let { TextForeground.Solid(it) }
@@ -694,10 +728,9 @@ internal object ComposeVisuals {
             foregroundEffect(invokePrefix(it, "getColor") as? Long, invokePrefix(it, "getBrush"), brushAlpha(it))
         }.valueOrNull()
         return when (foreground) {
-            is TextForeground.Solid -> colorHex(anchor, foreground.packed, alpha = alpha)
-            // A solid brush is its color at the brush's alpha.
-            is TextForeground.Shader -> solidBrushHex(foreground.brush, anchor, alpha * foreground.alpha)
-            null -> null
+            is TextForeground.Solid -> colorHex(anchor, foreground.packed, alpha = alpha * foreground.alpha)
+            // A shader has no one color (a solid brush is a Solid, above).
+            is TextForeground.Shader, null -> null
         }
     }
 

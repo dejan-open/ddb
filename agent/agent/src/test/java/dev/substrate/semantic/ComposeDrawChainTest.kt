@@ -170,6 +170,66 @@ class ComposeDrawChainTest {
         assertEquals(8f, readSized(null, 1f, SizedInfo(ShadowGraphicsLayerElement(4f, absolute), measured(100, 100))).cornerRadius!!, 0f)
     }
 
+    @Test
+    fun a_border_reports_the_width_compose_strokes() {
+        val rect = Any()
+        // border(100.dp) on a 40 dp-high node at density 2 is clamped to half of 80 px: 20 dp.
+        val oversized = readSized(null, 2f, SizedInfo(BorderModifierNodeElement(100f, ShaderBrush(), rect), measured(200, 80)))
+        assertEquals(20f, oversized.border!!.width, 0f)
+        // border(1.dp) at density 2.625 is 2.625 px, stroked as 3.
+        val fractional = readSized(null, 2.625f, SizedInfo(BorderModifierNodeElement(1f, ShaderBrush(), rect), measured(262, 105)))
+        assertEquals(3f / 2.625f, fractional.border!!.width, 1e-6f)
+        // The clamp is against the measured size, not window bounds an ancestor clips.
+        val clipped = readSized(Bounds(0, 0, 10, 10), 1f, SizedInfo(BorderModifierNodeElement(8f, ShaderBrush(), rect), measured(100, 100)))
+        assertEquals(8f, clipped.border!!.width, 0f)
+    }
+
+    // Text colors: a TextStyle's and a SpanStyle's color, brush and alpha, with Compose's getters.
+    class SolidColor(private val value: Long)
+    class LinearGradient
+    class ColorTextStyle(private val color: Long, private val brush: Any? = null, private val alpha: Float = Float.NaN) {
+        fun getFontSize(): Long = ComposeVisuals.packSp(14f)
+        fun getColor(): Long = color
+        fun getBrush(): Any? = brush
+        fun getAlpha(): Float = alpha
+    }
+    class ColorSpanStyle(private val color: Long, private val brush: Any? = null) {
+        fun getColor(): Long = color
+        fun getBrush(): Any? = brush
+        fun getAlpha(): Float = Float.NaN
+    }
+
+    private val red = 0xFFFF0000L shl 32
+    private val blue = 0xFF0000FFL shl 32
+    private val unspecified = ComposeVisuals.UNSPECIFIED_COLOR
+
+    private fun textColor(style: Any, vararg spans: Range): String? =
+        read(TextAnnotatedStringElement(AnnotatedString("Hello", *spans), style)).textColor
+
+    @Test
+    fun a_solid_text_brush_is_drawn_as_a_color_that_a_color_span_replaces() {
+        val redBrush = ColorTextStyle(unspecified, SolidColor(red))
+        assertEquals("#FF0000", textColor(redBrush))
+        // A full-range SpanStyle(color = Blue) over it draws the text blue.
+        assertEquals("#0000FF", textColor(redBrush, Range(ColorSpanStyle(blue), 0, 5)))
+        // The brush alpha applies to the solid color, as AndroidTextPaint.setBrush applies it.
+        assertEquals("#80FF0000", textColor(ColorTextStyle(unspecified, SolidColor(red), alpha = 0.5f)))
+        // A plain color style, for comparison.
+        assertEquals("#0000FF", textColor(ColorTextStyle(red), Range(ColorSpanStyle(blue), 0, 5)))
+    }
+
+    @Test
+    fun a_shader_text_brush_keeps_drawing_under_a_color_span() {
+        val gradient = ColorTextStyle(unspecified, LinearGradient())
+        assertNull(textColor(gradient))
+        assertNull(textColor(gradient, Range(ColorSpanStyle(blue), 0, 5)))
+        // A solid span brush is a color span too: the shader still draws over it.
+        assertNull(textColor(gradient, Range(ColorSpanStyle(unspecified, SolidColor(blue)), 0, 5)))
+        // Over a color it sets its own color, and a shader span brush hides any one color.
+        assertEquals("#0000FF", textColor(ColorTextStyle(red), Range(ColorSpanStyle(unspecified, SolidColor(blue)), 0, 5)))
+        assertNull(textColor(ColorTextStyle(red), Range(ColorSpanStyle(unspecified, LinearGradient()), 0, 5)))
+    }
+
     private fun em(value: Float): Long =
         ComposeVisuals.TEXT_UNIT_EM or (java.lang.Float.floatToRawIntBits(value).toLong() and 0xFFFFFFFFL)
 
