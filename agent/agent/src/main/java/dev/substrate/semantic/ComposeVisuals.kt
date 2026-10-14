@@ -666,13 +666,16 @@ internal object ComposeVisuals {
                         // ColorPainter fills its bounds with one color: that is a background, not
                         // an image, and a transparent one draws nothing (no padding boundary).
                         val base = (field(painter, "color") as? Long)?.takeIf { it != UNSPECIFIED_COLOR }?.let { argb(element, it) }
-                        if (base == null || (scaleAlpha(base, painterAlpha * layerAlpha()) ushr 24) == 0) continue
-                        seenDraw = true
+                            ?: continue
                         // The painter's color filter applies to the fill by the rule image tints
                         // follow ([tinted]: SrcIn, Src, SrcAtop); one that can't be decoded
                         // (lighting, a color matrix, another blend mode) leaves its color unknown.
+                        // The filter runs before the visibility test: a Src tint over a transparent
+                        // fill draws the tint.
                         val filter = field(element, "colorFilter")
                         val filtered = if (filter == null) null else filteredArgb(filter, scaleAlpha(base, painterAlpha), element)
+                        if ((scaleAlpha(filtered ?: scaleAlpha(base, painterAlpha), layerAlpha()) ushr 24) == 0) continue
+                        seenDraw = true
                         val fill = if (filter == null) {
                             argbHex(scaleAlpha(base, painterAlpha * layerAlpha()), keepTransparent = false)
                         } else {

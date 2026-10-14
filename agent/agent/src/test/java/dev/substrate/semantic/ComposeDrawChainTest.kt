@@ -974,4 +974,15 @@ class ComposeDrawChainTest {
         assertEquals("#0000FF", chain(BackgroundElement(red, RectangleShape), PainterElement(ColorPainter(0xFF00FF00L shl 32), tint(blue))).background)
         assertEquals("#FF0000", chain(BackgroundElement(red, RectangleShape), PainterElement(ColorPainter(blue), LightingColorFilter())).background)
     }
+
+    @Test
+    fun a_src_filter_draws_over_a_transparent_color_painter() {
+        // paint(ColorPainter(Transparent), colorFilter = ColorFilter.tint(Blue, BlendMode.Src)):
+        // Src replaces the transparent source with blue, so the box is blue.
+        val v = read(PainterElement(ColorPainter(transparent), tint(blue, BlendMode.Src)))
+        assertEquals("#0000FF", v.background)
+        assertTrue(v.draws)
+        // SrcIn keeps the source alpha: still nothing drawn.
+        assertNull(read(PainterElement(ColorPainter(transparent), tint(blue))).background)
+    }
 }
