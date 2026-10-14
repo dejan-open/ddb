@@ -187,6 +187,19 @@ class ViewDrawableTest {
     }
 
     @Test
+    fun a_later_opaque_gradient_ripple_layer_covers_the_earlier_ones() {
+        val highlight = ColorStateList.valueOf(Color.GRAY)
+        // Red content, then a square blue-to-green gradient over the same bounds: the gradient shows.
+        val gradient = GradientDrawable(GradientDrawable.Orientation.TOP_BOTTOM, intArrayOf(Color.BLUE, Color.GREEN))
+        val covered = background(sized(RippleDrawable(highlight, ColorDrawable(Color.RED), null).apply { addLayer(gradient) }))!!
+        assertNull(covered.fill)
+        assertEquals(listOf("#0000FF", "#00FF00"), covered.gradient!!.colors)
+        // A gradient with a translucent stop lets the red fill show.
+        val fade = GradientDrawable(GradientDrawable.Orientation.TOP_BOTTOM, intArrayOf(Color.BLUE, 0x8000FF00.toInt()))
+        assertEquals("#FF0000", background(sized(RippleDrawable(highlight, ColorDrawable(Color.RED), null).apply { addLayer(fade) }))!!.fill)
+    }
+
+    @Test
     fun a_later_non_covering_ripple_layer_adds_what_it_draws() {
         val highlight = ColorStateList.valueOf(Color.GRAY)
         // A red fill layer, then a transparent shape with a blue stroke: both draw, so the

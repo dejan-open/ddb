@@ -590,6 +590,7 @@ internal object ComposeVisuals {
                     // drawn in (background(Red).background(Blue), paint(bitmap).background(Blue))
                     // covers it: the inner one is what shows, and everything recorded for the
                     // covered draws (color, gradient, corner radius, image) is replaced by it.
+                    // A decoded gradient whose every stop is opaque covers the same way.
                     // A translucent one, a shaped one or one in another box only draws over part.
                     // Whether it covers is decided at its own opacity, before the layer and host
                     // alpha: inside graphicsLayer(alpha = 0.5f) an opaque fill still hides what it
@@ -598,7 +599,10 @@ internal object ComposeVisuals {
                     val shape = field(element, "shape")
                     val localSolid = (field(element, "color") as? Long)?.let { colorHex(element, it) }
                         ?: if (brushAlpha > 0f) solidBrushHex(brush, element, brushAlpha) else null
-                    val covers = localSolid != null && localSolid.length == 7 && box != null && box == fillBounds &&
+                    val localGrad = if (brushAlpha > 0f) gradient(brush, element, brushAlpha) else null
+                    val opaque = (localSolid != null && localSolid.length == 7) ||
+                        (localGrad != null && gradientOpaque(localGrad.colors))
+                    val covers = opaque && box != null && box == fillBounds &&
                         layerAlpha() == fillAlpha && rectangular(shape)
                     if (fillBounds == null) {
                         fillBounds = box
@@ -612,7 +616,7 @@ internal object ComposeVisuals {
                     }
                     v = v.copy(
                         background = if (covers) solid else v.background ?: solid,
-                        gradient = if (covers) null else v.gradient ?: grad ?: opaqueBrush,
+                        gradient = if (covers) grad else v.gradient ?: grad ?: opaqueBrush,
                         cornerRadius = keptRadius,
                         imageType = if (covers) null else v.imageType,
                         imageTint = if (covers) null else v.imageTint,
@@ -872,6 +876,10 @@ internal object ComposeVisuals {
     /** False when every stop is fully transparent (#00RRGGBB): such a gradient draws nothing. */
     fun gradientVisible(colors: List<String>): Boolean =
         colors.any { !(it.length == 9 && it.startsWith("#00")) }
+
+    /** True when every stop is fully opaque (#RRGGBB): such a gradient hides what it is drawn over. */
+    fun gradientOpaque(colors: List<String>): Boolean =
+        colors.isNotEmpty() && colors.all { it.length == 7 }
 
     /**
      * Whether a border with brush class [brushClass] puts pixels on screen. A solid brush draws

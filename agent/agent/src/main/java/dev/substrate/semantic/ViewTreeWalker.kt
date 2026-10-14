@@ -1310,8 +1310,8 @@ object ViewTreeWalker {
      * A View's background as it draws, with the View's background tint ([backgroundTint]). A
      * ColorDrawable is a fill; a GradientDrawable is read by [gradientBackground]. A
      * RippleDrawable draws its non-mask layers in order: a later one over the same bounds that
-     * covers the earlier ones (an opaque, square fill with no gradient, by the cover rule the
-     * Compose path uses) replaces them; any other later layer adds what it visibly draws over
+     * covers the earlier ones (an opaque, square fill, or a square gradient whose every stop is
+     * opaque, by the cover rule the Compose path uses) replaces them; any other later layer adds what it visibly draws over
      * them ([mergeLayer]). Every color is faded by the View's [alpha] (its own times every
      * ancestor's), as its RenderNode draws it. Null for any other drawable, or no background.
      */
@@ -1356,9 +1356,13 @@ object ViewTreeWalker {
         return DrawnBackground(fill, radius, border, gradient, under.customDraw || over.customDraw)
     }
 
-    /** Whether a drawn background hides everything under it in its bounds: an opaque square fill, no gradient. */
+    /**
+     * Whether a drawn background hides everything under it in its bounds: square, and either an
+     * opaque fill with no gradient or a gradient whose every stop is opaque.
+     */
     private fun covers(drawn: DrawnBackground?): Boolean =
-        drawn != null && drawn.fill?.length == 7 && drawn.cornerRadiusPx == null && drawn.gradient == null && !drawn.customDraw
+        drawn != null && drawn.cornerRadiusPx == null && !drawn.customDraw &&
+            (drawn.gradient?.let { ComposeVisuals.gradientOpaque(it.colors) } ?: (drawn.fill?.length == 7))
 
     /** Whether layers [a] and [b] of [layers] are drawn in the same bounds: the same insets, size and gravity. */
     private fun sameLayerBounds(layers: android.graphics.drawable.LayerDrawable, a: Int, b: Int): Boolean {

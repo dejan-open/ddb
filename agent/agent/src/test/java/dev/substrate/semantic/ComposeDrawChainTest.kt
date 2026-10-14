@@ -348,7 +348,10 @@ class ComposeDrawChainTest {
 
     // Text colors: a TextStyle's and a SpanStyle's color, brush and alpha, with Compose's getters.
     class SolidColor(private val value: Long)
-    class LinearGradient
+
+    /** A Compose Color in a List: boxed, with the `unbox-impl` getter the reader calls. */
+    @JvmInline value class StopColor(val value: Long)
+    class LinearGradient(private val colors: List<StopColor>? = null)
     class ColorTextStyle(private val color: Long, private val brush: Any? = null, private val alpha: Float = Float.NaN) {
         fun getFontSize(): Long = ComposeVisuals.packSp(14f)
         fun getColor(): Long = color
@@ -430,8 +433,8 @@ class ComposeDrawChainTest {
         assertEquals(FontInfo("sans-serif", "bold", 14f), read(TextAnnotatedStringElement(allBold, base)).font)
     }
 
-    // A background with Compose's fields: a solid color (no brush) and a shape.
-    class BackgroundElement(private val color: Long, private val shape: Any)
+    // A background with Compose's fields: a solid color (or Unspecified with a brush) and a shape.
+    class BackgroundElement(private val color: Long, private val shape: Any, private val brush: Any? = null)
 
     @Test
     fun a_clip_or_shadow_layer_after_the_first_draw_does_not_round_it() {
@@ -870,6 +873,25 @@ class ComposeDrawChainTest {
         val shown = chain(BackgroundElement(blue, RectangleShape), PainterElement(BitmapPainter()))
         assertEquals("raster", shown.imageType)
         assertEquals("#0000FF", shown.background)
+    }
+
+    @Test
+    fun an_inner_opaque_gradient_covers_an_outer_painter_and_fill() {
+        val box = placed(0, 0, 40)
+        fun chain(vararg elements: Any) = readSized(Bounds(0, 0, 40, 40), 1f, *elements.map { SizedInfo(it, box) }.toTypedArray())
+        val green = 0xFF00FF00L shl 32
+        val opaque = LinearGradient(listOf(StopColor(blue), StopColor(green)))
+        // Modifier.paint(bitmap).background(Brush.linearGradient(listOf(Blue, Green))): only the gradient shows.
+        val covered = chain(PainterElement(BitmapPainter()), BackgroundElement(unspecified, RectangleShape, opaque))
+        assertNull(covered.imageType)
+        assertEquals(GradientInfo("linear", listOf("#0000FF", "#00FF00"), null), covered.gradient)
+        // It replaces an earlier fill the same way.
+        val filled = chain(BackgroundElement(red, RectangleShape), BackgroundElement(unspecified, RectangleShape, opaque))
+        assertNull(filled.background)
+        assertEquals(listOf("#0000FF", "#00FF00"), filled.gradient!!.colors)
+        // A gradient with a translucent stop lets the image through.
+        val fade = LinearGradient(listOf(StopColor(blue), StopColor(0x8000FF00L shl 32)))
+        assertEquals("raster", chain(PainterElement(BitmapPainter()), BackgroundElement(unspecified, RectangleShape, fade)).imageType)
     }
 
     @Test
