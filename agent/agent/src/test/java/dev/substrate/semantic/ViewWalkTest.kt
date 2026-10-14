@@ -13,6 +13,10 @@ import android.widget.FrameLayout
 import android.widget.ImageView
 import android.widget.LinearLayout
 import android.widget.TextView
+import androidx.compose.ui.layout.PlacedCoordinates
+import androidx.compose.ui.layout.WindowRect
+import androidx.compose.ui.platform.AndroidComposeView
+import androidx.compose.ui.platform.LayoutNode
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertNull
@@ -207,5 +211,47 @@ class ViewWalkTest {
         assertEquals("#80FF0000", text.background)
         assertEquals(BorderInfo(4f, "#800000FF"), text.border)
         assertEquals("#80FF0000", text.color)
+    }
+
+    @Test
+    fun a_compose_tree_draws_at_the_alpha_of_the_view_that_hosts_it() {
+        val activity = Robolectric.buildActivity(Activity::class.java).setup().get()
+        // background(Color.Red) on the root LayoutNode, in an AndroidComposeView at alpha 0.5.
+        val red = 0xFFFF0000L shl 32
+        val node = LayoutNode(
+            PlacedCoordinates(WindowRect(0f, 0f, 40f, 40f)),
+            listOf(ComposeDrawChainTest.Info(ComposeDrawChainTest.BackgroundElement(red, Any()))),
+        )
+        val host = AndroidComposeView(activity, node).apply { alpha = 0.5f }
+        activity.setContentView(FrameLayout(activity).apply { addView(host, FrameLayout.LayoutParams(40, 40)) })
+        shadowOf(Looper.getMainLooper()).idle()
+        val compose = ViewTreeWalker.walk(activity).elements.single { it.id.startsWith("compose_") }
+        // The host's RenderNode fades the opaque red to 0x80.
+        assertEquals("#80FF0000", compose.background)
+    }
+
+    @Test
+    fun a_background_tint_mode_that_is_not_modelled_leaves_the_colors_unknown() {
+        val elements = walk { context ->
+            listOf(
+                View(context).apply {
+                    id = android.R.id.icon1
+                    background = ColorDrawable(Color.RED)
+                    backgroundTintList = ColorStateList.valueOf(Color.BLUE)
+                    backgroundTintBlendMode = BlendMode.MULTIPLY
+                },
+                View(context).apply {
+                    id = android.R.id.icon2
+                    background = shape()
+                    backgroundTintList = ColorStateList.valueOf(Color.BLUE)
+                    backgroundTintBlendMode = BlendMode.MULTIPLY
+                },
+            )
+        }
+        // MULTIPLY still filters the drawable: its colors are unknown, not the untinted red.
+        assertNull(elements.getValue("icon1").background)
+        val shaped = elements.getValue("icon2")
+        assertNull(shaped.background)
+        assertNull(shaped.border)
     }
 }

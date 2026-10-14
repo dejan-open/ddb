@@ -199,7 +199,7 @@ object ViewTreeWalker {
             if (isComposeView(view)) {
                 try {
                     val before = elements.size
-                    val ok = walkComposeSemanticsOwner(view, density, ::nextZ, elements, log)
+                    val ok = walkComposeSemanticsOwner(view, density, ::nextZ, elements, log, alpha)
                     if (!ok && view is ViewGroup) {
                         val group = view as ViewGroup
                         for (i in 0 until group.childCount) {
@@ -434,9 +434,19 @@ object ViewTreeWalker {
         nextZ: () -> Int,
         out: MutableList<SemanticElement>,
         log: StringBuilder,
+        // The alpha [view] draws at: its own times every ancestor's.
+        viewAlpha: Float = 1f,
     ): Boolean {
         // Find AndroidComposeView (may be `view` itself or a descendant)
         val androidComposeView = findAndroidComposeView(view) ?: return false
+        // Its RenderNode fades everything Compose draws in it, with every View between it and
+        // [view] fading it too: the alpha the whole Compose tree starts from.
+        var hostAlpha = viewAlpha
+        var between: View? = androidComposeView
+        while (between != null && between !== view) {
+            hostAlpha *= between.alpha
+            between = between.parent as? View
+        }
         val owner = try {
             val m = androidComposeView.javaClass.methods.firstOrNull { it.name == "getSemanticsOwner" && it.parameterCount == 0 }
             m?.invoke(androidComposeView)
@@ -474,7 +484,7 @@ object ViewTreeWalker {
                     val configs = HashMap<Int, Any>()
                     if (rootNode != null) collectSemanticsConfigs(rootNode, configs)
                     val res = androidComposeView.resources
-                    walkLayoutNode(it, configs, density, res.configuration.fontScale, res, nextZ, out, log, false)
+                    walkLayoutNode(it, configs, density, res.configuration.fontScale, res, nextZ, out, log, false, hostAlpha)
                 }
             },
             semanticsWalk = rootNode?.let { { walkSemanticsNode(it, density, nextZ, out, log, 0, false) } },
@@ -1307,7 +1317,7 @@ object ViewTreeWalker {
         val tint = backgroundTint(view, layer)
         return when (layer) {
             // getColor() is the color with the drawable's alpha already applied (setAlpha).
-            is ColorDrawable -> DrawnBackground(fill = visibleColor(ComposeVisuals.scaleAlpha(tinted(layer.color, tint), alpha)))
+            is ColorDrawable -> DrawnBackground(fill = tinted(layer.color, tint)?.let { visibleColor(ComposeVisuals.scaleAlpha(it, alpha)) })
             is GradientDrawable -> gradientBackground(layer, density, tint, view.width, view.height, alpha)
             else -> null
         }
@@ -1331,8 +1341,12 @@ object ViewTreeWalker {
         return Tint(color, mode)
     }
 
-    /** [argb] under [tint] ([ComposeVisuals.tinted]); unchanged with no tint, or a mode that isn't modelled. */
-    internal fun tinted(argb: Int, tint: Tint?): Int = tint?.let { ComposeVisuals.tinted(argb, it.color, it.mode) } ?: argb
+    /**
+     * [argb] under [tint] ([ComposeVisuals.tinted]); unchanged with no tint. Null for a mode that
+     * isn't modelled (MULTIPLY, SCREEN, ADD, …): the drawable is still tint-filtered, so its color
+     * on screen is unknown, and the visual it would describe is left out, not reported untinted.
+     */
+    internal fun tinted(argb: Int, tint: Tint?): Int? = if (tint == null) argb else ComposeVisuals.tinted(argb, tint.color, tint.mode)
 
     /**
      * [argb] with its alpha modulated by a drawable's own alpha ([drawableAlpha], 0..255) the way
@@ -1520,7 +1534,7 @@ object ViewTreeWalker {
             tint != null && drawable.colors == null -> drawable.alpha shl 24
             else -> return null
         }
-        return visibleColor(ComposeVisuals.scaleAlpha(tinted(fill, tint), alpha))
+        return tinted(fill, tint)?.let { visibleColor(ComposeVisuals.scaleAlpha(it, alpha)) }
     }
 
     /**
@@ -1599,7 +1613,7 @@ object ViewTreeWalker {
         drawableAlpha: Int = 255,
         tint: Tint? = null,
         alpha: Float = 1f,
-    ): BorderInfo? = strokeBorder(paint.strokeWidth, ComposeVisuals.scaleAlpha(tinted(modulate(paint.color, drawableAlpha), tint), alpha), density)
+    ): BorderInfo? = strokeBorder(paint.strokeWidth, tinted(modulate(paint.color, drawableAlpha), tint)?.let { ComposeVisuals.scaleAlpha(it, alpha) }, density)
 
     /**
      * A stroke read from a GradientDrawable's GradientState ([state], the drawable's
@@ -1620,7 +1634,7 @@ object ViewTreeWalker {
         val width = gradientStateField(state, "mStrokeWidth") as? Int ?: return null
         val colors = gradientStateField(state, "mStrokeColors") as? android.content.res.ColorStateList
         val color = stateColor(colors, drawableState) ?: android.graphics.Color.TRANSPARENT
-        return strokeBorder(width.toFloat(), ComposeVisuals.scaleAlpha(tinted(modulate(color, drawableAlpha), tint), alpha), density)
+        return strokeBorder(width.toFloat(), tinted(modulate(color, drawableAlpha), tint)?.let { ComposeVisuals.scaleAlpha(it, alpha) }, density)
     }
 
     /**
@@ -1667,7 +1681,8 @@ object ViewTreeWalker {
      * [alpha]. Null with no gradient to report ([gradientStops]).
      */
     internal fun gradientInfo(drawable: GradientDrawable, tint: Tint? = null, alpha: Float = 1f): GradientInfo? {
-        val colors = drawable.colors?.map { ComposeVisuals.scaleAlpha(tinted(modulate(it, drawable.alpha), tint), alpha) }?.toIntArray()
+        // One stop whose tinted color is unknown (a tint mode that isn't modelled) leaves the gradient unknown.
+        val colors = drawable.colors?.map { ComposeVisuals.scaleAlpha(tinted(modulate(it, drawable.alpha), tint) ?: return null, alpha) }?.toIntArray()
         val stops = gradientStops(colors) ?: return null
 
         val type =
