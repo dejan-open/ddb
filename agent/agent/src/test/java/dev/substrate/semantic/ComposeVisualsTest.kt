@@ -84,6 +84,23 @@ class ComposeVisualsTest {
     }
 
     @Test
+    fun brush_and_painter_alpha_scale_the_drawn_alpha() {
+        assertEquals(0xFFFF0000.toInt(), ComposeVisuals.scaleAlpha(0xFFFF0000.toInt(), 1f))
+        assertEquals(0x80FF0000.toInt(), ComposeVisuals.scaleAlpha(0xFFFF0000.toInt(), 0.5f))
+        assertEquals(0x40112233, ComposeVisuals.scaleAlpha(0x80112233.toInt(), 0.5f))
+        assertNull(ComposeVisuals.argbHex(ComposeVisuals.scaleAlpha(0xFFFF0000.toInt(), 0f), keepTransparent = false))
+    }
+
+    @Test
+    fun unspecified_font_size_is_composes_default() {
+        assertEquals(14f, ComposeVisuals.fontSizeSp(Float.NaN)!!, 0f)
+        assertEquals(17f, ComposeVisuals.fontSizeSp(17f)!!, 0f)
+        assertNull(ComposeVisuals.fontSizeSp(null))
+        assertNull(ComposeVisuals.fontSizeSp(0f))
+        assertNull(ComposeVisuals.fontSizeSp(Float.POSITIVE_INFINITY))
+    }
+
+    @Test
     fun field_reads_private_backing_fields_through_superclasses() {
         open class Base(private val shape: String)
         class Element(private val brush: String) : Base("rounded")

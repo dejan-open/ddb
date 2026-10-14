@@ -61,11 +61,15 @@ internal object ComposeVisuals {
             val element = invoke0(info, "getModifier") ?: continue
             when (element.javaClass.simpleName) {
                 "BackgroundElement" -> {
-                    seenDraw = true
+                    // background(brush, alpha) scales the brush only; the color overload has none.
+                    val brushAlpha = (field(element, "alpha") as? Float)?.takeIf { it.isFinite() } ?: 1f
                     val brush = field(element, "brush")
                     val color = colorHex(element, (field(element, "color") as? Long) ?: UNSPECIFIED_COLOR)
-                    val grad = gradient(brush, element)
-                    val solid = color ?: solidBrushHex(brush, element)
+                    val grad = if (brushAlpha > 0f) gradient(brush, element, brushAlpha) else null
+                    val solid = color ?: if (brushAlpha > 0f) solidBrushHex(brush, element, brushAlpha) else null
+                    // A brush at alpha 0 with no color under it draws nothing.
+                    if (color == null && brushAlpha <= 0f) continue
+                    seenDraw = true
                     v = v.copy(
                         background = v.background ?: solid,
                         gradient = v.gradient ?: grad,
@@ -89,6 +93,9 @@ internal object ComposeVisuals {
                     }
                 }
                 "PainterElement" -> {
+                    // Image(alpha = 0f) / paint(alpha = 0f) draws nothing.
+                    val painterAlpha = (field(element, "alpha") as? Float)?.takeIf { it.isFinite() } ?: 1f
+                    if (painterAlpha <= 0f) continue
                     seenDraw = true
                     val painter = field(element, "painter")
                     val type = painterType(painter)
@@ -100,7 +107,7 @@ internal object ComposeVisuals {
                         )
                     } else if (painter?.javaClass?.simpleName == "ColorPainter" && v.background == null) {
                         // ColorPainter fills its bounds with one color: that is a background, not an image.
-                        val fill = (field(painter, "color") as? Long)?.let { colorHex(element, it) }
+                        val fill = (field(painter, "color") as? Long)?.let { colorHex(element, it, alpha = painterAlpha) }
                         if (fill != null) {
                             v = v.copy(
                                 background = fill,
@@ -111,20 +118,25 @@ internal object ComposeVisuals {
                 }
                 "ShadowGraphicsLayerElement" -> {
                     val elev = (field(element, "elevation") as? Float)?.takeIf { it.isFinite() && it > 0f }
+                    // A shadow is a draw: it sets the inside/outside boundary like a background.
+                    if (elev != null) seenDraw = true
                     v = v.copy(
                         elevation = v.elevation ?: elev,
                         cornerRadius = v.cornerRadius ?: cornerRadius(field(element, "shape"), density, ownBounds(info) ?: nodeBounds),
+                        drawBounds = if (elev != null) firstDrawBounds(info) else v.drawBounds,
                     )
                 }
                 "GraphicsLayerElement" -> {
                     val alpha = field(element, "alpha") as? Float
-                    val shadow = (field(element, "shadowElevation") as? Float)?.takeIf { it > 0f }?.let { it / density }
+                    val shadow = (field(element, "shadowElevation") as? Float)?.takeIf { it.isFinite() && it > 0f }?.let { it / density }
                     val clip = field(element, "clip") as? Boolean ?: false
+                    if (shadow != null) seenDraw = true
                     v = v.copy(
                         alpha = if (alpha != null && alpha < 1f) minOf(alpha, v.alpha ?: 1f) else v.alpha,
                         elevation = v.elevation ?: shadow,
                         cornerRadius = v.cornerRadius
                             ?: if (clip || shadow != null) cornerRadius(field(element, "shape"), density, ownBounds(info) ?: nodeBounds) else null,
+                        drawBounds = if (shadow != null) firstDrawBounds(info) else v.drawBounds,
                     )
                 }
                 "PaddingElement" -> {
@@ -135,6 +147,13 @@ internal object ComposeVisuals {
                         dp(field(element, "end")),
                     )
                     if (seenDraw) innerPad = add(innerPad, p) else outerPad = add(outerPad, p)
+                }
+                "PaddingValuesElement" -> {
+                    // Modifier.padding(PaddingValues), e.g. a Scaffold's content padding.
+                    val p = paddingValues(field(element, "paddingValues"), layoutNode)
+                    if (p != null) {
+                        if (seenDraw) innerPad = add(innerPad, p) else outerPad = add(outerPad, p)
+                    }
                 }
                 "TextStringSimpleElement", "TextAnnotatedStringElement" -> {
                     val style = field(element, "style")
@@ -237,11 +256,63 @@ internal object ComposeVisuals {
         return if (a == 255) String.format("#%02X%02X%02X", r, g, b) else String.format("#%02X%02X%02X%02X", a, r, g, b)
     }
 
+    /**
+     * Alpha [alpha] (0..1) applied on top of [argb]'s own alpha, as Compose multiplies a
+     * brush's or painter's alpha into what it draws.
+     */
+    fun scaleAlpha(argb: Int, alpha: Float): Int {
+        if (alpha >= 1f || alpha.isNaN()) return argb
+        val a = ((argb ushr 24) * alpha.coerceAtLeast(0f) + 0.5f).toInt().coerceIn(0, 255)
+        return (a shl 24) or (argb and 0x00FFFFFF)
+    }
+
+    /** Compose's default font size: TextStyle.Default leaves it unspecified and text draws at 14sp. */
+    const val DEFAULT_FONT_SIZE_SP = 14f
+
+    /**
+     * Font size in sp from the reflected TextUnit value: null when it could not be read,
+     * Compose's default when it is unspecified (NaN), the value when it is a real size.
+     */
+    fun fontSizeSp(raw: Float?): Float? = when {
+        raw == null -> null
+        raw.isNaN() -> DEFAULT_FONT_SIZE_SP
+        raw.isFinite() && raw > 0f -> raw
+        else -> null
+    }
+
     // ---- reflection ----
+
+    /** [top, bottom, start, end] in dp from a PaddingValues, or null when it can't be read. */
+    private fun paddingValues(pv: Any?, layoutNode: Any): FloatArray? {
+        if (pv == null) return null
+        // PaddingValuesImpl keeps the four Dp values as fields.
+        val top = field(pv, "top") as? Float
+        val bottom = field(pv, "bottom") as? Float
+        val start = field(pv, "start") as? Float
+        val end = field(pv, "end") as? Float
+        if (top != null && bottom != null && start != null && end != null) {
+            return floatArrayOf(dp(top), dp(bottom), dp(start), dp(end))
+        }
+        // Any other PaddingValues (window insets, a custom one) computes them on demand.
+        return try {
+            val t = invokePrefix(pv, "calculateTopPadding") as? Float ?: return null
+            val b = invokePrefix(pv, "calculateBottomPadding") as? Float ?: return null
+            val direction = invoke0(layoutNode, "getLayoutDirection") ?: return null
+            val rtl = (direction as? Enum<*>)?.name == "Rtl"
+            fun side(name: String): Float? = pv.javaClass.methods
+                .firstOrNull { (it.name == name || it.name.startsWith("$name-")) && it.parameterCount == 1 }
+                ?.invoke(pv, direction) as? Float
+            val left = side("calculateLeftPadding") ?: return null
+            val right = side("calculateRightPadding") ?: return null
+            floatArrayOf(dp(t), dp(b), dp(if (rtl) right else left), dp(if (rtl) left else right))
+        } catch (_: Throwable) {
+            null
+        }
+    }
 
     private fun font(style: Any?, fontScale: Float, resources: Resources?): FontInfo? {
         if (style == null) return null
-        val sizeSp = textUnitValue(style, invokePrefix(style, "getFontSize") as? Long) ?: return null
+        val sizeSp = fontSizeSp(textUnitValue(style, invokePrefix(style, "getFontSize") as? Long)) ?: return null
         val family = invoke0(style, "getFontFamily")
         var weight = invoke0(invoke0(style, "getFontWeight"), "getWeight") as? Int
         var familyName = "sans-serif"
@@ -284,7 +355,8 @@ internal object ComposeVisuals {
         return try {
             val cls = Class.forName("androidx.compose.ui.unit.TextUnit", false, anchor.javaClass.classLoader)
             val m = cls.methods.firstOrNull { it.name.startsWith("getValue-impl") && it.parameterCount == 1 }
-            (m?.invoke(null, packed) as? Float)?.takeIf { it.isFinite() && it > 0f }
+            // NaN is TextUnit.Unspecified; fontSizeSp resolves it to the default.
+            m?.invoke(null, packed) as? Float
         } catch (_: Throwable) {
             null
         }
@@ -328,12 +400,12 @@ internal object ComposeVisuals {
         return (field(filter, "color") as? Long)?.let { colorHex(anchor, it) }
     }
 
-    private fun solidBrushHex(brush: Any?, anchor: Any): String? {
+    private fun solidBrushHex(brush: Any?, anchor: Any, alpha: Float = 1f): String? {
         if (brush?.javaClass?.simpleName != "SolidColor") return null
-        return (field(brush, "value") as? Long)?.let { colorHex(anchor, it) }
+        return (field(brush, "value") as? Long)?.let { colorHex(anchor, it, alpha = alpha) }
     }
 
-    private fun gradient(brush: Any?, anchor: Any): GradientInfo? {
+    private fun gradient(brush: Any?, anchor: Any, alpha: Float = 1f): GradientInfo? {
         val name = brush?.javaClass?.simpleName ?: return null
         val type = when (name) {
             "LinearGradient" -> "linear"
@@ -345,7 +417,7 @@ internal object ComposeVisuals {
             val packed = c?.javaClass?.methods?.firstOrNull { it.name == "unbox-impl" }?.invoke(c) as? Long
             // A transparent stop is still a stop: Compose hands every color to the shader,
             // so a fade to Color.Transparent keeps its #00000000 end.
-            packed?.let { colorHex(anchor, it, keepTransparent = true) }
+            packed?.let { colorHex(anchor, it, keepTransparent = true, alpha = alpha) }
         } ?: return null
         if (colors.size < 2) return null
         val orientation = if (type == "linear") {
@@ -420,14 +492,14 @@ internal object ComposeVisuals {
         }
     }
 
-    private fun colorHex(anchor: Any, packed: Long, keepTransparent: Boolean = false): String? {
+    private fun colorHex(anchor: Any, packed: Long, keepTransparent: Boolean = false, alpha: Float = 1f): String? {
         if (packed == UNSPECIFIED_COLOR) return null
         return try {
             val kt = Class.forName("androidx.compose.ui.graphics.ColorKt", false, anchor.javaClass.classLoader)
             val m = kt.methods.firstOrNull {
                 it.name.startsWith("toArgb") && it.parameterCount == 1 && it.parameterTypes[0] == java.lang.Long.TYPE
             }
-            (m?.invoke(null, packed) as? Int)?.let { argbHex(it, keepTransparent) }
+            (m?.invoke(null, packed) as? Int)?.let { argbHex(scaleAlpha(it, alpha), keepTransparent) }
         } catch (_: Throwable) {
             null
         }
