@@ -631,4 +631,41 @@ class ComposeDrawChainTest {
             ViewTreeWalker.composeBox(touchable = true, bounds = node, drawBounds = v.drawBounds, margin = v.margin),
         )
     }
+
+    // Modifier.clickable { }: the element that gives the node its click.
+    class ClickableElement
+
+    private fun clickAndPadding(vararg first: Any): ComposeDrawInfo = readSized(
+        Bounds(0, 0, 64, 64), 1f,
+        *first.map { SizedInfo(it, placed(0, 0, 64)) }.toTypedArray(),
+        SizedInfo(BackgroundElement(red, Any()), placed(8, 8, 48)),
+    )
+
+    @Test
+    fun a_click_outside_the_padding_taps_the_whole_box_margin_included() {
+        // Modifier.clickable { }.padding(8.dp).background(Red) on a 64 × 64 node: the background
+        // is drawn 48 × 48 inside an 8 dp margin, and the click covers the whole 64 dp box.
+        val node = Bounds(0, 0, 64, 64)
+        val v = clickAndPadding(ClickableElement(), pad(8f))
+        assertEquals(MarginInfo(8, 8, 8, 8), v.margin)
+        assertTrue(v.clickOutsideMargin)
+        assertEquals(
+            ViewTreeWalker.ComposeBox(Bounds(8, 8, 48, 48), MarginInfo(8, 8, 8, 8), tapTarget = node),
+            ViewTreeWalker.composeBox(true, node, v.drawBounds, v.margin, v.clickOutsideMargin),
+        )
+    }
+
+    @Test
+    fun a_click_inside_the_padding_sets_no_tap_target() {
+        // Modifier.padding(8.dp).clickable { }.background(Red): the click covers only the 48 dp
+        // box inside the padding, which is the drawn box, so there is no larger tap target.
+        val node = Bounds(0, 0, 64, 64)
+        val v = clickAndPadding(pad(8f), ClickableElement())
+        assertEquals(MarginInfo(8, 8, 8, 8), v.margin)
+        assertFalse(v.clickOutsideMargin)
+        assertEquals(
+            ViewTreeWalker.ComposeBox(Bounds(8, 8, 48, 48), MarginInfo(8, 8, 8, 8)),
+            ViewTreeWalker.composeBox(true, node, v.drawBounds, v.margin, v.clickOutsideMargin),
+        )
+    }
 }

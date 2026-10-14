@@ -38,6 +38,12 @@ internal data class ComposeDrawInfo(
      * without calling drawContent(): the modifiers after it and the node's children are not drawn.
      */
     val contentSkipped: Boolean = false,
+    /**
+     * The node's click (clickable, combinedClickable, toggleable, selectable) comes before any
+     * outer padding in the chain (clickable { }.padding(8.dp)), so it covers the whole box,
+     * margin included.
+     */
+    val clickOutsideMargin: Boolean = false,
 ) {
     val draws: Boolean
         // A shadow is drawn on its own, with no background or content under it.
@@ -432,6 +438,12 @@ internal object ComposeVisuals {
         "TextStringSimpleElement", "TextAnnotatedStringElement", "SelectableTextAnnotatedStringElement",
     )
 
+    /** Modifiers that give a node its click: it covers the box they are applied to. */
+    private val CLICK_ELEMENTS = setOf(
+        "ClickableElement", "CombinedClickableElement", "ToggleableElement", "TriStateToggleableElement",
+        "SelectableElement",
+    )
+
     fun read(
         layoutNode: Any,
         density: Float,
@@ -453,6 +465,8 @@ internal object ComposeVisuals {
         var outerPad: FloatArray? = null
         var innerPad: FloatArray? = null
         var seenDraw = false
+        // A click seen before any outer padding covers the whole box, margin included.
+        var clickOutsideMargin = false
         // The first drawing modifier owns the draw bounds, even when they equal the node's
         // (recorded as null): a later modifier inside padding must not replace them.
         var drawBoundsTaken = false
@@ -520,6 +534,7 @@ internal object ComposeVisuals {
                 continue
             }
             when (name) {
+                in CLICK_ELEMENTS -> if (outerPad == null) clickOutsideMargin = true
                 "BackgroundElement" -> {
                     // background(brush, alpha) scales the brush only; the color overload has none.
                     val brushAlpha = (field(element, "alpha") as? Float)?.takeIf { it.isFinite() } ?: 1f
@@ -719,6 +734,7 @@ internal object ComposeVisuals {
                 ?.takeIf { it.top > 0 || it.bottom > 0 || it.start > 0 || it.end > 0 },
             margin = outerPad?.let { MarginInfo(it[0].toInt(), it[1].toInt(), it[2].toInt(), it[3].toInt()) }
                 ?.takeIf { it.top > 0 || it.bottom > 0 || it.start > 0 || it.end > 0 },
+            clickOutsideMargin = clickOutsideMargin,
         )
     }
 
