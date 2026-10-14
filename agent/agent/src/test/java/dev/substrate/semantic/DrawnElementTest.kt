@@ -139,4 +139,24 @@ class DrawnElementTest {
             SemanticServer.imageYaml("photo", "raster"),
         )
     }
+
+    @Test
+    fun a_layout_walk_that_emits_nothing_falls_back() {
+        fun walk(layout: (MutableList<SemanticElement>) -> Unit, semantics: Boolean): Pair<Boolean, List<String>> {
+            val out = mutableListOf<SemanticElement>()
+            val ok = ViewTreeWalker.composeWalk(
+                layoutWalk = { layout(out) },
+                semanticsWalk = if (semantics) ({ out.add(element("semantics", parent)) }) else null,
+                out = out,
+                log = StringBuilder(),
+            )
+            return ok to out.map { it.id }
+        }
+        val emits: (MutableList<SemanticElement>) -> Unit = { it.add(element("layout", parent)) }
+        assertEquals(true to listOf("layout"), walk(emits, semantics = true))
+        // A layout walk that returns without emitting (a child accessor failed softly) runs the
+        // semantics walk, and with no semantics root the caller walks the View tree.
+        assertEquals(true to listOf("semantics"), walk({}, semantics = true))
+        assertEquals(false to emptyList<String>(), walk({}, semantics = false))
+    }
 }

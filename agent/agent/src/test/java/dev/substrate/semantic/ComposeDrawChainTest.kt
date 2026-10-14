@@ -816,4 +816,31 @@ class ComposeDrawChainTest {
         val rounded = RoundedCornerShape(DpCornerSize(8f))
         assertEquals("#FF0000", fills(BackgroundElement(red, RectangleShape), BackgroundElement(blue, rounded)).background)
     }
+
+    @Test
+    fun an_inner_opaque_background_covers_an_outer_painter() {
+        val box = placed(0, 0, 40)
+        fun chain(vararg elements: Any) = readSized(Bounds(0, 0, 40, 40), 1f, *elements.map { SizedInfo(it, box) }.toTypedArray())
+        // Modifier.paint(bitmap).background(Blue): the blue fill hides the image.
+        val covered = chain(PainterElement(BitmapPainter()), BackgroundElement(blue, RectangleShape))
+        assertNull(covered.imageType)
+        assertEquals("#0000FF", covered.background)
+        // Modifier.background(Blue).paint(bitmap): the image is drawn over the blue fill.
+        val shown = chain(BackgroundElement(blue, RectangleShape), PainterElement(BitmapPainter()))
+        assertEquals("raster", shown.imageType)
+        assertEquals("#0000FF", shown.background)
+    }
+
+    @Test
+    fun an_inner_opaque_rectangular_background_clears_the_covered_corner_radius() {
+        // Modifier.background(Red, RoundedCornerShape(8.dp)).background(Blue): a blue rectangle.
+        val box = placed(0, 0, 40)
+        fun chain(vararg elements: Any) = readSized(Bounds(0, 0, 40, 40), 1f, *elements.map { SizedInfo(it, box) }.toTypedArray())
+        val rounded = RoundedCornerShape(DpCornerSize(8f))
+        val covered = chain(BackgroundElement(red, rounded), BackgroundElement(blue, RectangleShape))
+        assertEquals("#0000FF", covered.background)
+        assertNull(covered.cornerRadius)
+        // Without the covering fill the rounded red one keeps its corners.
+        assertEquals(8f, chain(BackgroundElement(red, rounded)).cornerRadius!!, 0f)
+    }
 }

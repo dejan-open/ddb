@@ -453,26 +453,54 @@ object ViewTreeWalker {
         // semantics id both trees share — LayoutNode's own config getter has
         // been renamed across Compose releases, the id has not. Falls back to
         // the semantics-only walk if the LayoutNode surface isn't reachable.
-        val before = out.size
-        try {
-            val root = androidComposeView.javaClass.methods
+        val root = try {
+            androidComposeView.javaClass.methods
                 .firstOrNull { it.name == "getRoot" && it.parameterCount == 0 && it.returnType.simpleName == "LayoutNode" }
                 ?.invoke(androidComposeView)
-            if (root != null) {
-                val configs = HashMap<Int, Any>()
-                if (rootNode != null) collectSemanticsConfigs(rootNode, configs)
-                val res = androidComposeView.resources
-                walkLayoutNode(root, configs, density, res.configuration.fontScale, res, nextZ, out, log, false)
-                log.appendLine("COMPOSE_LAYOUT ok configs=${configs.size} emitted=${out.size - before}")
-                return true
-            }
         } catch (e: Throwable) {
-            log.appendLine("COMPOSE_LAYOUT failed=${e.javaClass.simpleName}:${e.message}")
-            while (out.size > before) out.removeAt(out.size - 1)
+            log.appendLine("COMPOSE_LAYOUT root fetch failed=${e.javaClass.simpleName}:${e.message}")
+            null
         }
+        return composeWalk(
+            layoutWalk = root?.let {
+                {
+                    val configs = HashMap<Int, Any>()
+                    if (rootNode != null) collectSemanticsConfigs(rootNode, configs)
+                    val res = androidComposeView.resources
+                    walkLayoutNode(it, configs, density, res.configuration.fontScale, res, nextZ, out, log, false)
+                }
+            },
+            semanticsWalk = rootNode?.let { { walkSemanticsNode(it, density, nextZ, out, log, 0, false) } },
+            out = out,
+            log = log,
+        )
+    }
 
-        if (rootNode == null) return false
-        walkSemanticsNode(rootNode, density, nextZ, out, log, 0, false)
+    /**
+     * The LayoutNode walk when it emits something, else the semantics-only walk. A walk that
+     * throws or emits nothing (a renamed child accessor fails softly) falls back; with no
+     * semantics root either, the result is false and the caller walks the View tree.
+     */
+    internal fun composeWalk(
+        layoutWalk: (() -> Unit)?,
+        semanticsWalk: (() -> Unit)?,
+        out: MutableList<SemanticElement>,
+        log: StringBuilder,
+    ): Boolean {
+        val before = out.size
+        if (layoutWalk != null) {
+            try {
+                layoutWalk()
+                val emitted = out.size - before
+                log.appendLine("COMPOSE_LAYOUT ok emitted=$emitted")
+                if (emitted > 0) return true
+            } catch (e: Throwable) {
+                log.appendLine("COMPOSE_LAYOUT failed=${e.javaClass.simpleName}:${e.message}")
+                while (out.size > before) out.removeAt(out.size - 1)
+            }
+        }
+        if (semanticsWalk == null) return false
+        semanticsWalk()
         return true
     }
 

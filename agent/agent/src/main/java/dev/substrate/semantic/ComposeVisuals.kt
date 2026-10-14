@@ -475,8 +475,12 @@ internal object ComposeVisuals {
         var clickSeen = false
         // The box a minimum interactive size modifier before the click grew the node to.
         var minimumTouchBounds: Bounds? = null
-        // The window box the first background fill was drawn in.
+        // The window box the first fill or image was drawn in. Every later modifier draws
+        // inside it, so an opaque rectangular fill over this whole box covers all of them.
         var fillBounds: Bounds? = null
+        // Whether the corner radius came from a fill, which a covering fill replaces (a
+        // border's or an enclosing layer's still shows).
+        var radiusFromFill = false
         // The first drawing modifier owns the draw bounds, even when they equal the node's
         // (recorded as null): a later modifier inside padding must not replace them.
         var drawBoundsTaken = false
@@ -576,17 +580,28 @@ internal object ComposeVisuals {
                     } else {
                         null
                     }
-                    // A later opaque solid fill over the whole box an earlier fill was drawn in
-                    // (background(Red).background(Blue)) covers it: the inner one is what shows.
+                    // A later opaque solid fill over the whole box an earlier fill or image was
+                    // drawn in (background(Red).background(Blue), paint(bitmap).background(Blue))
+                    // covers it: the inner one is what shows, and everything recorded for the
+                    // covered draws (color, gradient, corner radius, image) is replaced by it.
                     // A translucent one, a shaped one or one in another box only draws over part.
                     val box = ownBounds(info)
+                    val shape = field(element, "shape")
                     val covers = solid != null && solid.length == 7 && box != null && box == fillBounds &&
-                        rectangular(field(element, "shape"))
-                    if (v.background == null && v.gradient == null) fillBounds = box
+                        rectangular(shape)
+                    if (fillBounds == null) fillBounds = box
+                    val radius = cornerRadius(shape, density, measuredSize(info, nodeBounds))
+                    val keptRadius = if (covers && (v.cornerRadius == null || radiusFromFill)) {
+                        radius
+                    } else {
+                        v.cornerRadius ?: radius.also { radiusFromFill = it != null }
+                    }
                     v = v.copy(
                         background = if (covers) solid else v.background ?: solid,
                         gradient = if (covers) null else v.gradient ?: grad ?: opaqueBrush,
-                        cornerRadius = v.cornerRadius ?: cornerRadius(field(element, "shape"), density, measuredSize(info, nodeBounds)),
+                        cornerRadius = keptRadius,
+                        imageType = if (covers) null else v.imageType,
+                        imageTint = if (covers) null else v.imageTint,
                         drawBounds = firstDrawBounds(info),
                     )
                 }
@@ -635,6 +650,7 @@ internal object ComposeVisuals {
                         val fill = (field(painter, "color") as? Long)?.let { colorHex(element, it, alpha = painterAlpha * layerAlpha()) }
                             ?: continue
                         seenDraw = true
+                        if (fillBounds == null) fillBounds = ownBounds(info)
                         v = v.copy(
                             background = v.background ?: fill,
                             drawBounds = firstDrawBounds(info),
@@ -642,6 +658,7 @@ internal object ComposeVisuals {
                         continue
                     }
                     seenDraw = true
+                    if (fillBounds == null) fillBounds = ownBounds(info)
                     val type = if (coil) "loaded" else painterType(painter)
                     if (type != null && v.imageType == null) {
                         v = v.copy(
