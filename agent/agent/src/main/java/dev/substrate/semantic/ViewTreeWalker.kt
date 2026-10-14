@@ -491,14 +491,17 @@ object ViewTreeWalker {
         out: MutableList<SemanticElement>,
         log: StringBuilder,
         inheritedClickable: Boolean,
+        // The product of every ancestor's graphics-layer alpha: it fades this subtree too.
+        inheritedAlpha: Float = 1f,
     ) {
         if (ComposeVisuals.invoke0(node, "isPlaced") == false) return
         // The outer coordinator is the box the node occupies, before any of
         // its own padding; getCoordinates is the inner (content) box.
         val coords = ComposeVisuals.invokeInternal(node, "getOuterCoordinator") ?: ComposeVisuals.invoke0(node, "getCoordinates")
         val bounds = coords?.let { ComposeVisuals.boundsInWindow(it) }
-        val visuals = ComposeVisuals.read(node, density, fontScale, resources, bounds)
-        if (visuals.alpha != null && visuals.alpha <= 0f) {
+        val visuals = ComposeVisuals.read(node, density, fontScale, resources, bounds, inheritedAlpha)
+        val subtreeAlpha = inheritedAlpha * (visuals.alpha ?: 1f)
+        if (subtreeAlpha <= 0f) {
             log.appendLine("COMPOSE_SKIP hidden alpha=0 bounds=$bounds")
             return
         }
@@ -560,7 +563,7 @@ object ViewTreeWalker {
             )?.let { m -> try { m.invoke(node) as? List<*> } catch (_: Throwable) { null } }
             ?: return
         for (child in children) {
-            if (child != null) walkLayoutNode(child, configs, density, fontScale, resources, nextZ, out, log, isClickable)
+            if (child != null) walkLayoutNode(child, configs, density, fontScale, resources, nextZ, out, log, isClickable, subtreeAlpha)
         }
     }
 

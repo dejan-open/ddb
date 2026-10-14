@@ -42,9 +42,15 @@ internal object ComposeVisuals {
         fontScale: Float,
         resources: Resources?,
         nodeBounds: Bounds?,
+        inheritedAlpha: Float = 1f,
     ): ComposeDrawInfo {
         val infos = invoke0(layoutNode, "getModifierInfo") as? List<*> ?: return ComposeDrawInfo()
         var v = ComposeDrawInfo()
+        // Graphics-layer alpha fades everything after the layer in the chain (and the
+        // subtree), and stacked layers multiply. ownAlpha is this node's layers only;
+        // layerAlpha is what a modifier at the current chain position is drawn with.
+        var ownAlpha = 1f
+        fun layerAlpha(): Float = inheritedAlpha * ownAlpha
         var outerPad: FloatArray? = null
         var innerPad: FloatArray? = null
         var seenDraw = false
@@ -64,11 +70,15 @@ internal object ComposeVisuals {
                     // background(brush, alpha) scales the brush only; the color overload has none.
                     val brushAlpha = (field(element, "alpha") as? Float)?.takeIf { it.isFinite() } ?: 1f
                     val brush = field(element, "brush")
-                    val color = colorHex(element, (field(element, "color") as? Long) ?: UNSPECIFIED_COLOR)
-                    val grad = if (brushAlpha > 0f) gradient(brush, element, brushAlpha) else null
-                    val solid = color ?: if (brushAlpha > 0f) solidBrushHex(brush, element, brushAlpha) else null
-                    // A brush at alpha 0 with no color under it draws nothing.
-                    if (color == null && brushAlpha <= 0f) continue
+                    val color = colorHex(element, (field(element, "color") as? Long) ?: UNSPECIFIED_COLOR, alpha = layerAlpha())
+                    val grad = if (brushAlpha > 0f) gradient(brush, element, brushAlpha * layerAlpha()) else null
+                    val solid = color ?: if (brushAlpha > 0f) solidBrushHex(brush, element, brushAlpha * layerAlpha()) else null
+                    // Nothing drawn: a transparent color with no brush, a brush at alpha 0, or a
+                    // solid brush with no color left. Any other brush (a gradient, a ShaderBrush)
+                    // still draws, even when its colors could not be read.
+                    val brushDrawsNothing = brush == null || brushAlpha <= 0f ||
+                        (brush.javaClass.simpleName == "SolidColor" && solid == null)
+                    if (color == null && brushDrawsNothing) continue
                     seenDraw = true
                     v = v.copy(
                         background = v.background ?: solid,
@@ -81,7 +91,7 @@ internal object ComposeVisuals {
                     seenDraw = true
                     val width = borderWidthDp(field(element, "width") as? Float, density)
                     val brush = field(element, "brush")
-                    val color = solidBrushHex(brush, element)
+                    val color = solidBrushHex(brush, element, layerAlpha())
                     // A solid border with no color left is a fully transparent one: not drawn.
                     val invisible = color == null && brush?.javaClass?.simpleName == "SolidColor"
                     if (width != null && !invisible && v.border == null) {
@@ -102,12 +112,12 @@ internal object ComposeVisuals {
                     if (type != null && v.imageType == null) {
                         v = v.copy(
                             imageType = type,
-                            imageTint = colorFilterHex(field(element, "colorFilter"), element),
+                            imageTint = colorFilterHex(field(element, "colorFilter"), element, painterAlpha * layerAlpha()),
                             drawBounds = firstDrawBounds(info),
                         )
                     } else if (painter?.javaClass?.simpleName == "ColorPainter" && v.background == null) {
                         // ColorPainter fills its bounds with one color: that is a background, not an image.
-                        val fill = (field(painter, "color") as? Long)?.let { colorHex(element, it, alpha = painterAlpha) }
+                        val fill = (field(painter, "color") as? Long)?.let { colorHex(element, it, alpha = painterAlpha * layerAlpha()) }
                         if (fill != null) {
                             v = v.copy(
                                 background = fill,
@@ -126,16 +136,28 @@ internal object ComposeVisuals {
                         drawBounds = if (elev != null) firstDrawBounds(info) else v.drawBounds,
                     )
                 }
-                "GraphicsLayerElement" -> {
-                    val alpha = field(element, "alpha") as? Float
-                    val shadow = (field(element, "shadowElevation") as? Float)?.takeIf { it.isFinite() && it > 0f }?.let { it / density }
-                    val clip = field(element, "clip") as? Boolean ?: false
+                "GraphicsLayerElement", "BlockGraphicsLayerElement" -> {
+                    // graphicsLayer(alpha = …) keeps the values as fields; graphicsLayer { … }
+                    // keeps a block, which is run on a fresh layer scope to read them.
+                    val layer = if (element.javaClass.simpleName == "GraphicsLayerElement") {
+                        LayerProps(
+                            alpha = field(element, "alpha") as? Float,
+                            shadowPx = field(element, "shadowElevation") as? Float,
+                            clip = field(element, "clip") as? Boolean ?: false,
+                            shape = field(element, "shape"),
+                        )
+                    } else {
+                        blockLayer(element, density)
+                    } ?: continue
+                    val alpha = layer.alpha?.takeIf { it.isFinite() }?.coerceIn(0f, 1f)
+                    if (alpha != null && alpha < 1f) ownAlpha *= alpha
+                    val shadow = layer.shadowPx?.takeIf { it.isFinite() && it > 0f }?.let { it / density }
                     if (shadow != null) seenDraw = true
                     v = v.copy(
-                        alpha = if (alpha != null && alpha < 1f) minOf(alpha, v.alpha ?: 1f) else v.alpha,
+                        alpha = if (ownAlpha < 1f) ownAlpha else v.alpha,
                         elevation = v.elevation ?: shadow,
                         cornerRadius = v.cornerRadius
-                            ?: if (clip || shadow != null) cornerRadius(field(element, "shape"), density, ownBounds(info) ?: nodeBounds) else null,
+                            ?: if (layer.clip || shadow != null) cornerRadius(layer.shape, density, ownBounds(info) ?: nodeBounds) else null,
                         drawBounds = if (shadow != null) firstDrawBounds(info) else v.drawBounds,
                     )
                 }
@@ -158,7 +180,7 @@ internal object ComposeVisuals {
                 "TextStringSimpleElement", "TextAnnotatedStringElement" -> {
                     val style = field(element, "style")
                     val producer = field(element, "color")
-                    val color = textColorHex(producer, style, element)
+                    val color = textColorHex(producer, style, element, layerAlpha())
                     val maxLines = (field(element, "maxLines") as? Int)?.takeIf { it in 1 until Int.MAX_VALUE }
                     v = v.copy(
                         font = v.font ?: font(style, fontScale, resources),
@@ -362,10 +384,45 @@ internal object ComposeVisuals {
         }
     }
 
-    private fun textColorHex(producer: Any?, style: Any?, anchor: Any): String? {
+    private fun textColorHex(producer: Any?, style: Any?, anchor: Any, alpha: Float): String? {
         val stylePacked = style?.let { invokePrefix(it, "getColor") as? Long }
         val packed = textColorPacked(producer != null, producerPacked(producer), stylePacked) ?: return null
-        return colorHex(anchor, packed)
+        return colorHex(anchor, packed, alpha = alpha)
+    }
+
+    private class LayerProps(val alpha: Float?, val shadowPx: Float?, val clip: Boolean, val shape: Any?)
+
+    /**
+     * The layer properties a `graphicsLayer { … }` block sets, read by running the block on a
+     * fresh ReusableGraphicsLayerScope with the screen density (so `8.dp.toPx()` resolves as
+     * it does on screen). Null when any of that is unavailable in this Compose release.
+     */
+    private fun blockLayer(element: Any, density: Float): LayerProps? {
+        val block = (field(element, "block") ?: field(element, "layerBlock")) as? Function1<*, *> ?: return null
+        return try {
+            val loader = element.javaClass.classLoader
+            val scopeClass = Class.forName("androidx.compose.ui.graphics.ReusableGraphicsLayerScope", false, loader)
+            val scope = scopeClass.getDeclaredConstructor().apply { isAccessible = true }.newInstance()
+            val densityKt = Class.forName("androidx.compose.ui.unit.DensityKt", false, loader)
+            val densityObj = densityKt.methods
+                .firstOrNull { it.name == "Density" && it.parameterCount == 2 }
+                ?.invoke(null, density, 1f)
+            if (densityObj != null) {
+                scopeClass.methods
+                    .firstOrNull { it.name.startsWith("setGraphicsDensity") && it.parameterCount == 1 }
+                    ?.invoke(scope, densityObj)
+            }
+            @Suppress("UNCHECKED_CAST")
+            (block as Function1<Any?, Any?>).invoke(scope)
+            LayerProps(
+                alpha = invokePrefix(scope, "getAlpha") as? Float,
+                shadowPx = invokePrefix(scope, "getShadowElevation") as? Float,
+                clip = invokePrefix(scope, "getClip") as? Boolean ?: false,
+                shape = invokePrefix(scope, "getShape"),
+            )
+        } catch (_: Throwable) {
+            null
+        }
     }
 
     private fun producerPacked(producer: Any?): Long? {
@@ -395,9 +452,9 @@ internal object ComposeVisuals {
         return if (producerUnspecified && style == UNSPECIFIED_COLOR) BLACK_PACKED else null
     }
 
-    private fun colorFilterHex(filter: Any?, anchor: Any): String? {
+    private fun colorFilterHex(filter: Any?, anchor: Any, alpha: Float): String? {
         if (filter == null) return null
-        return (field(filter, "color") as? Long)?.let { colorHex(anchor, it) }
+        return (field(filter, "color") as? Long)?.let { colorHex(anchor, it, alpha = alpha) }
     }
 
     private fun solidBrushHex(brush: Any?, anchor: Any, alpha: Float = 1f): String? {
