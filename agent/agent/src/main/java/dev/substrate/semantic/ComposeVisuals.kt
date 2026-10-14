@@ -482,6 +482,19 @@ internal object ComposeVisuals {
         // The layer alpha the first fill or image was drawn at. A later fill covers it only
         // inside the same layers: a layer between the two fades the inner fill over the outer.
         var fillAlpha = 1f
+        // Whether a clipping layer came after the first fill or image: everything drawn inside it
+        // is clipped, so a later fill covers the first one only when that clip is a rectangle over
+        // the whole box it was drawn in (background(Red).graphicsLayer { clip = true; shape =
+        // CircleShape }.background(Blue) leaves red showing outside the circle).
+        var fillClipped = false
+        fun clipsAfterFill(clip: Boolean, shape: Any?, info: Any) {
+            if (fillBounds != null && clip && !(rectangular(shape) && ownBounds(info) == fillBounds)) fillClipped = true
+        }
+        // The color filters of this node's graphics layers so far, outermost first: each recolors
+        // everything drawn after it in the chain. Colors drawn inside go through them (innermost
+        // first) before the layer alpha; one that can't be decoded leaves those colors unknown.
+        val layerFilters = ArrayList<Any>()
+        fun filtersKnown(anchor: Any): Boolean = layerFilters.all { filteredArgb(it, 0, anchor) != null }
         // Whether the corner radius came from a fill, which a covering fill replaces (a
         // border's or an enclosing layer's still shows).
         var radiusFromFill = false
@@ -565,12 +578,16 @@ internal object ComposeVisuals {
                     // background(brush, alpha) scales the brush only; the color overload has none.
                     val brushAlpha = (field(element, "alpha") as? Float)?.takeIf { it.isFinite() } ?: 1f
                     val brush = field(element, "brush")
-                    val color = colorHex(element, (field(element, "color") as? Long) ?: UNSPECIFIED_COLOR, alpha = layerAlpha())
-                    val decoded = if (brushAlpha > 0f) gradient(brush, element, brushAlpha * layerAlpha()) else null
+                    // Inside a layer whose color filter can't be decoded, the fill is judged by
+                    // what it would draw unfiltered, and its colors are unknown.
+                    val filtersKnown = filtersKnown(element)
+                    val filters = if (filtersKnown) layerFilters else emptyList()
+                    val color = colorHex(element, (field(element, "color") as? Long) ?: UNSPECIFIED_COLOR, filters = filters, after = layerAlpha())
+                    val decoded = if (brushAlpha > 0f) gradient(brush, element, brushAlpha, filters, layerAlpha()) else null
                     // A gradient keeps transparent stops for its fade, but one whose every stop
                     // is transparent draws nothing.
                     val grad = decoded?.takeIf { gradientVisible(it.colors) }
-                    val solid = color ?: if (brushAlpha > 0f) solidBrushHex(brush, element, brushAlpha * layerAlpha()) else null
+                    val solid = color ?: if (brushAlpha > 0f) solidBrushHex(brush, element, brushAlpha, filters, layerAlpha()) else null
                     // Nothing drawn: a transparent color with no brush, a brush at alpha 0, a
                     // solid brush with no color left, or an all-transparent gradient. Any other
                     // brush (a ShaderBrush) still draws, even when its colors could not be read.
@@ -579,6 +596,15 @@ internal object ComposeVisuals {
                         (decoded != null && grad == null)
                     if (color == null && brushDrawsNothing) continue
                     seenDraw = true
+                    if (!filtersKnown) {
+                        // On screen in colors that are unknown: a custom draw that covers nothing.
+                        if (fillBounds == null) {
+                            fillBounds = ownBounds(info)
+                            fillAlpha = layerAlpha()
+                        }
+                        v = v.copy(customDraw = true, drawBounds = firstDrawBounds(info))
+                        continue
+                    }
                     // A brush that draws but whose colors can't be decoded (a ShaderBrush, or a
                     // gradient whose stops failed to read) is still a visual: its type, no colors.
                     val opaqueBrush = if (grad == null && solid == null && !brushDrawsNothing) {
@@ -597,13 +623,13 @@ internal object ComposeVisuals {
                     // is drawn over, and the faded result (the scaled solid) is what shows.
                     val box = ownBounds(info)
                     val shape = field(element, "shape")
-                    val localSolid = (field(element, "color") as? Long)?.let { colorHex(element, it) }
-                        ?: if (brushAlpha > 0f) solidBrushHex(brush, element, brushAlpha) else null
-                    val localGrad = if (brushAlpha > 0f) gradient(brush, element, brushAlpha) else null
+                    val localSolid = (field(element, "color") as? Long)?.let { colorHex(element, it, filters = filters) }
+                        ?: if (brushAlpha > 0f) solidBrushHex(brush, element, brushAlpha, filters) else null
+                    val localGrad = if (brushAlpha > 0f) gradient(brush, element, brushAlpha, filters) else null
                     val opaque = (localSolid != null && localSolid.length == 7) ||
                         (localGrad != null && gradientOpaque(localGrad.colors))
                     val covers = opaque && box != null && box == fillBounds &&
-                        layerAlpha() == fillAlpha && rectangular(shape)
+                        layerAlpha() == fillAlpha && !fillClipped && rectangular(shape)
                     if (fillBounds == null) {
                         fillBounds = box
                         fillAlpha = layerAlpha()
@@ -628,18 +654,21 @@ internal object ComposeVisuals {
                     // smaller side of the size the modifier draws at.
                     val width = borderWidthDp(field(element, "width") as? Float, density, measuredSize(info, nodeBounds))
                     val brush = field(element, "brush")
-                    val color = solidBrushHex(brush, element, layerAlpha())
+                    // Inside a layer whose color filter can't be decoded: judged unfiltered, color unknown.
+                    val filtersKnown = filtersKnown(element)
+                    val filters = if (filtersKnown) layerFilters else emptyList()
+                    val color = solidBrushHex(brush, element, 1f, filters, layerAlpha())
                     // A solid border with no color left is a fully transparent one: not drawn.
                     // Compose strokes a gradient border with the brush itself, so one whose every
                     // stop is transparent draws nothing either, as for backgrounds.
-                    val stops = gradient(brush, element, layerAlpha())?.colors
+                    val stops = gradient(brush, element, 1f, filters, layerAlpha())?.colors
                     val invisible = !borderDraws(brush?.javaClass?.simpleName, color, stops)
                     // Only a border that draws sets the inside/outside padding boundary.
                     if (width == null || invisible) continue
                     seenDraw = true
                     if (v.border == null) {
                         v = v.copy(
-                            border = BorderInfo(width = width, color = color),
+                            border = BorderInfo(width = width, color = color?.takeIf { filtersKnown }),
                             cornerRadius = v.cornerRadius ?: cornerRadius(field(element, "shape"), density, measuredSize(info, nodeBounds), rtl),
                             drawBounds = firstDrawBounds(info),
                         )
@@ -652,7 +681,8 @@ internal object ComposeVisuals {
                     // paint(painter, colorFilter = ColorFilter.tint(Color.Transparent)) replaces every
                     // pixel the painter draws with a transparent one: nothing is on screen, as for a
                     // painter that draws nothing (no image, no tint, no padding boundary).
-                    if (filterHides(field(element, "colorFilter"), element)) continue
+                    // A layer's filter of that kind hides it the same way.
+                    if (filterHides(field(element, "colorFilter"), element) || layerFilters.any { filterHides(it, element) }) continue
                     val source = if (name == "ContentPainterElement") field(painterNode, "painter") else field(element, "painter")
                     // Coil's painter is an image loaded at run time, like a View bitmap with no
                     // resource, whatever painter it draws it with.
@@ -672,11 +702,13 @@ internal object ComposeVisuals {
                         // (lighting, a color matrix, another blend mode) leaves its color unknown.
                         // The filter runs before the visibility test: a Src tint over a transparent
                         // fill draws the tint.
+                        // The layers' color filters then recolor it the same way, after its own.
                         val filter = field(element, "colorFilter")
-                        val filtered = if (filter == null) null else filteredArgb(filter, scaleAlpha(base, painterAlpha), element)
+                        val painted = if (filter == null) scaleAlpha(base, painterAlpha) else filteredArgb(filter, scaleAlpha(base, painterAlpha), element)
+                        val filtered = painted?.let { throughFilters(layerFilters, it, element) }
                         if ((scaleAlpha(filtered ?: scaleAlpha(base, painterAlpha), layerAlpha()) ushr 24) == 0) continue
                         seenDraw = true
-                        val fill = if (filter == null) {
+                        val fill = if (filter == null && layerFilters.isEmpty()) {
                             argbHex(scaleAlpha(base, painterAlpha * layerAlpha()), keepTransparent = false)
                         } else {
                             filtered?.let { argbHex(scaleAlpha(it, layerAlpha()), keepTransparent = false) }
@@ -686,9 +718,9 @@ internal object ComposeVisuals {
                         // opacity, in the same layer): it replaces the color, gradient, the fill's
                         // corner radius and the image. A fill whose color is unknown covers nothing.
                         val box = ownBounds(info)
-                        val localFill = if (filter == null) argbHex(scaleAlpha(base, painterAlpha), keepTransparent = false) else filtered?.let { argbHex(it, keepTransparent = false) }
+                        val localFill = filtered?.let { argbHex(it, keepTransparent = false) }
                         val covers = localFill != null && localFill.length == 7 && box != null && box == fillBounds &&
-                            layerAlpha() == fillAlpha
+                            layerAlpha() == fillAlpha && !fillClipped
                         if (fillBounds == null) {
                             fillBounds = box
                             fillAlpha = layerAlpha()
@@ -714,7 +746,9 @@ internal object ComposeVisuals {
                     if (type != null && v.imageType == null) {
                         v = v.copy(
                             imageType = type,
-                            imageTint = colorFilterHex(field(element, "colorFilter"), element, painterAlpha * layerAlpha()),
+                            // A layer's color filter recolors the image after the painter's own: the
+                            // outermost one is the tint that shows.
+                            imageTint = colorFilterHex(layerFilters.lastOrNull() ?: field(element, "colorFilter"), element, painterAlpha * layerAlpha()),
                             drawBounds = firstDrawBounds(info),
                         )
                     }
@@ -731,6 +765,7 @@ internal object ComposeVisuals {
                     // draw came before it) and clips or shadows; a later layer shapes only what
                     // follows it, and one that does neither shapes nothing.
                     val shapes = !seenDraw && (elev != null || field(element, "clip") == true)
+                    clipsAfterFill(field(element, "clip") == true, field(element, "shape"), info)
                     // A shadow is a draw: it sets the inside/outside boundary like a background.
                     if (elev != null) seenDraw = true
                     v = v.copy(
@@ -755,10 +790,13 @@ internal object ComposeVisuals {
                             ),
                             scaleX = field(element, "scaleX") as? Float,
                             scaleY = field(element, "scaleY") as? Float,
+                            colorFilter = field(element, "colorFilter"),
                         )
                     } else {
                         blockLayer(element, composeDensity, density, fontScale, measuredSize(info, nodeBounds))
                     } ?: continue
+                    clipsAfterFill(layer.clip, layer.shape, info)
+                    layer.colorFilter?.let { layerFilters.add(it) }
                     val alpha = layer.alpha?.takeIf { it.isFinite() }?.coerceIn(0f, 1f)
                     if (alpha != null && alpha < 1f) ownAlpha *= alpha
                     // scale(0f) collapses the layer to nothing: like alpha 0, it hides what follows
@@ -1301,6 +1339,8 @@ internal object ComposeVisuals {
         val shadowColorsVisible: Boolean,
         val scaleX: Float? = null,
         val scaleY: Float? = null,
+        /** The layer's color filter, which recolors everything drawn inside it. */
+        val colorFilter: Any? = null,
     ) {
         /** Scaled to 0 on either axis ([layerCollapsed]). */
         val collapsed: Boolean get() = layerCollapsed(scaleX, scaleY)
@@ -1363,6 +1403,7 @@ internal object ComposeVisuals {
                 ),
                 scaleX = invokePrefix(scope, "getScaleX") as? Float,
                 scaleY = invokePrefix(scope, "getScaleY") as? Float,
+                colorFilter = invokePrefix(scope, "getColorFilter"),
             )
         } catch (_: Throwable) {
             null
@@ -1481,9 +1522,16 @@ internal object ComposeVisuals {
      */
     fun tintHides(tint: Int, mode: String?): Boolean = (tint ushr 24) == 0 && modeKey(mode) in REPLACING_MODES
 
-    private fun solidBrushHex(brush: Any?, anchor: Any, alpha: Float = 1f): String? {
+    /**
+     * [src] (ARGB) through graphics-layer color [filters] (outermost first), the innermost first,
+     * each by [filteredArgb]. Null when one can't be decoded.
+     */
+    private fun throughFilters(filters: List<Any>, src: Int, anchor: Any): Int? =
+        filters.foldRight(src as Int?) { filter, color -> color?.let { filteredArgb(filter, it, anchor) } }
+
+    private fun solidBrushHex(brush: Any?, anchor: Any, alpha: Float = 1f, filters: List<Any> = emptyList(), after: Float = 1f): String? {
         if (brush?.javaClass?.simpleName != "SolidColor") return null
-        return (field(brush, "value") as? Long)?.let { colorHex(anchor, it, alpha = alpha) }
+        return (field(brush, "value") as? Long)?.let { colorHex(anchor, it, alpha = alpha, filters = filters, after = after) }
     }
 
     private fun brushType(brush: Any?): String? = when (brush?.javaClass?.simpleName) {
@@ -1493,13 +1541,13 @@ internal object ComposeVisuals {
         else -> null
     }
 
-    private fun gradient(brush: Any?, anchor: Any, alpha: Float = 1f): GradientInfo? {
+    private fun gradient(brush: Any?, anchor: Any, alpha: Float = 1f, filters: List<Any> = emptyList(), after: Float = 1f): GradientInfo? {
         val type = brushType(brush) ?: return null
         val colors = (field(brush, "colors") as? List<*>)?.mapNotNull { c ->
             val packed = c?.javaClass?.methods?.firstOrNull { it.name == "unbox-impl" }?.invoke(c) as? Long
             // A transparent stop is still a stop: Compose hands every color to the shader,
             // so a fade to Color.Transparent keeps its #00000000 end.
-            packed?.let { colorHex(anchor, it, keepTransparent = true, alpha = alpha) }
+            packed?.let { colorHex(anchor, it, keepTransparent = true, alpha = alpha, filters = filters, after = after) }
         } ?: return null
         if (colors.size < 2) return null
         val orientation = if (type == "linear") {
@@ -1771,14 +1819,33 @@ internal object ComposeVisuals {
         }
     }
 
-    private fun colorHex(anchor: Any, packed: Long, keepTransparent: Boolean = false, alpha: Float = 1f): String? {
+    /**
+     * A packed color's hex at [alpha], put through graphics-layer color [filters]
+     * ([throughFilters]) and then faded by [after] (the layer alpha). Null when unspecified,
+     * transparent (unless [keepTransparent]), or a filter can't be decoded.
+     */
+    private fun colorHex(
+        anchor: Any,
+        packed: Long,
+        keepTransparent: Boolean = false,
+        alpha: Float = 1f,
+        filters: List<Any> = emptyList(),
+        after: Float = 1f,
+    ): String? {
         if (packed == UNSPECIFIED_COLOR) return null
         return try {
             val kt = Class.forName("androidx.compose.ui.graphics.ColorKt", false, anchor.javaClass.classLoader)
             val m = kt.methods.firstOrNull {
                 it.name.startsWith("toArgb") && it.parameterCount == 1 && it.parameterTypes[0] == java.lang.Long.TYPE
             }
-            (m?.invoke(null, packed) as? Int)?.let { argbHex(scaleAlpha(it, alpha), keepTransparent) }
+            (m?.invoke(null, packed) as? Int)?.let { argb ->
+                val shown = if (filters.isEmpty()) {
+                    scaleAlpha(argb, alpha * after)
+                } else {
+                    throughFilters(filters, scaleAlpha(argb, alpha), anchor)?.let { scaleAlpha(it, after) }
+                }
+                shown?.let { argbHex(it, keepTransparent) }
+            }
         } catch (_: Throwable) {
             null
         }

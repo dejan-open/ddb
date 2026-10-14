@@ -1377,13 +1377,24 @@ object ViewTreeWalker {
     /** One drawable [layer] of a View's background as it draws (see [viewBackground]). */
     private fun layerBackground(view: View, layer: Drawable, density: Float, alpha: Float = 1f): DrawnBackground? {
         val tint = backgroundTint(view, layer)
-        return when (layer) {
+        // A tint or filter [tinted] doesn't model (MULTIPLY, SCREEN, a color matrix) still draws
+        // the drawable, in colors that are unknown: whatever it would draw untinted is on screen
+        // as a custom draw with no color, so a touch target it backs is not taken for a ghost.
+        if (tint != null && tinted(0, tint) == null) {
+            val untinted = tintedBackground(view, layer, density, alpha, tint = null) ?: return null
+            val draws = untinted.fill != null || untinted.gradient != null || untinted.border != null || untinted.customDraw
+            return DrawnBackground(customDraw = draws)
+        }
+        return tintedBackground(view, layer, density, alpha, tint)
+    }
+
+    private fun tintedBackground(view: View, layer: Drawable, density: Float, alpha: Float, tint: Tint?): DrawnBackground? =
+        when (layer) {
             // getColor() is the color with the drawable's alpha already applied (setAlpha).
             is ColorDrawable -> DrawnBackground(fill = tinted(layer.color, tint)?.let { visibleColor(ComposeVisuals.scaleAlpha(it, alpha)) })
             is GradientDrawable -> gradientBackground(layer, density, tint, view.width, view.height, alpha)
             else -> null
         }
-    }
 
     /** A tint resolved for a drawable: its color, and its blend mode's name (null: the default, SRC_IN). */
     internal class Tint(val color: Int, val mode: String?)

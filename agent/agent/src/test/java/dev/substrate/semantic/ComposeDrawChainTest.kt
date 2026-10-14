@@ -33,6 +33,7 @@ class ComposeDrawChainTest {
         private val shape: Any? = null,
         private val scaleX: Float = 1f,
         private val scaleY: Float = 1f,
+        private val colorFilter: Any? = null,
     )
     class PaddingElement(
         private val start: Float,
@@ -984,5 +985,51 @@ class ComposeDrawChainTest {
         assertTrue(v.draws)
         // SrcIn keeps the source alpha: still nothing drawn.
         assertNull(read(PainterElement(ColorPainter(transparent), tint(blue))).background)
+    }
+
+    object CircleShape
+
+    @Test
+    fun a_clipping_layer_between_two_fills_keeps_the_outer_one_showing() {
+        val box = placed(0, 0, 40)
+        fun chain(vararg elements: Any) = readSized(Bounds(0, 0, 40, 40), 1f, *elements.map { SizedInfo(it, box) }.toTypedArray())
+        // Modifier.background(Red).graphicsLayer { clip = true; shape = CircleShape }.background(Blue):
+        // blue is clipped to the circle, and red shows outside it.
+        val circle = chain(BackgroundElement(red, RectangleShape), GraphicsLayerElement(1f, clip = true, shape = CircleShape), BackgroundElement(blue, RectangleShape))
+        assertEquals("#FF0000", circle.background)
+        val painted = chain(BackgroundElement(red, RectangleShape), GraphicsLayerElement(1f, clip = true, shape = CircleShape), PainterElement(ColorPainter(blue)))
+        assertEquals("#FF0000", painted.background)
+        // So does a clipping shadow: Modifier.shadow(0.dp, CircleShape, clip = true).
+        val shadow = chain(BackgroundElement(red, RectangleShape), ShadowGraphicsLayerElement(0f, CircleShape, clip = true), BackgroundElement(blue, RectangleShape))
+        assertEquals("#FF0000", shadow.background)
+        // A rectangular clip over the whole box clips nothing of the inner fill: blue covers red.
+        val square = chain(BackgroundElement(red, RectangleShape), GraphicsLayerElement(1f, clip = true, shape = RectangleShape), BackgroundElement(blue, RectangleShape))
+        assertEquals("#0000FF", square.background)
+        // A clip before the first fill clips both alike.
+        val before = chain(GraphicsLayerElement(1f, clip = true, shape = CircleShape), BackgroundElement(red, RectangleShape), BackgroundElement(blue, RectangleShape))
+        assertEquals("#0000FF", before.background)
+    }
+
+    @Test
+    fun a_layer_color_filter_recolors_what_is_drawn_inside_it() {
+        // Modifier.graphicsLayer { colorFilter = ColorFilter.tint(Blue, BlendMode.Src) }.background(Red): blue.
+        val block = readLayered(BlockGraphicsLayerElement { it.colorFilter = tint(blue, BlendMode.Src) }, BackgroundElement(red, RectangleShape))
+        assertEquals("#0000FF", block.background)
+        val fields = read(GraphicsLayerElement(1f, colorFilter = tint(blue, BlendMode.Src)), BackgroundElement(red, RectangleShape))
+        assertEquals("#0000FF", fields.background)
+        // A painter's fill and an image's tint too.
+        assertEquals("#0000FF", read(GraphicsLayerElement(1f, colorFilter = tint(blue)), PainterElement(ColorPainter(red))).background)
+        assertEquals("#0000FF", read(GraphicsLayerElement(1f, colorFilter = tint(blue)), PainterElement(VectorPainter())).imageTint)
+        // A draw before the layer keeps its color, and the layer alpha fades the filtered one.
+        assertEquals("#FF0000", read(BackgroundElement(red, RectangleShape), GraphicsLayerElement(1f, colorFilter = tint(blue))).background)
+        assertEquals("#800000FF", read(GraphicsLayerElement(0.5f, colorFilter = tint(blue, BlendMode.Src)), BackgroundElement(red, RectangleShape)).background)
+        // A filter that can't be decoded leaves the color unknown: still a draw, not the red.
+        val lit = read(GraphicsLayerElement(1f, colorFilter = LightingColorFilter()), BackgroundElement(red, RectangleShape))
+        assertNull(lit.background)
+        assertTrue(lit.customDraw)
+        assertTrue(lit.draws)
+        val litPainter = read(GraphicsLayerElement(1f, colorFilter = LightingColorFilter()), PainterElement(ColorPainter(red)))
+        assertNull(litPainter.background)
+        assertTrue(litPainter.draws)
     }
 }

@@ -254,4 +254,27 @@ class ViewWalkTest {
         assertNull(shaped.background)
         assertNull(shaped.border)
     }
+
+    @Test
+    fun a_wrapper_with_a_background_tint_that_is_not_modelled_is_not_a_ghost() {
+        // A clickable wrapper with no content of its own around a text: its MULTIPLY-tinted fill
+        // is on screen in an unknown color, so it is a real touch target, kept with its bounds.
+        val elements = walk { context ->
+            listOf(
+                FrameLayout(context).apply {
+                    id = android.R.id.button1
+                    isClickable = true
+                    background = ColorDrawable(Color.RED)
+                    backgroundTintList = ColorStateList.valueOf(Color.BLUE)
+                    backgroundTintBlendMode = BlendMode.MULTIPLY
+                    addView(TextView(context).apply { text = "Inside" }, FrameLayout.LayoutParams(60, 20))
+                },
+            )
+        }
+        val wrapper = elements["button1"]
+        assertNotNull("the wrapper is kept", wrapper)
+        assertNull(wrapper!!.background)
+        assertEquals(100, wrapper.bounds.w)
+        assertEquals(50, wrapper.bounds.h)
+    }
 }
