@@ -165,7 +165,13 @@ internal object ComposeVisuals {
                     }
                 }
                 "ShadowGraphicsLayerElement" -> {
-                    val elev = (field(element, "elevation") as? Float)?.takeIf { it.isFinite() && it > 0f }
+                    // A shadow whose ambient and spot colors are both transparent draws nothing.
+                    val elev = (field(element, "elevation") as? Float)?.takeIf {
+                        it.isFinite() && it > 0f && shadowColorsVisible(
+                            argb(element, field(element, "ambientColor") as? Long),
+                            argb(element, field(element, "spotColor") as? Long),
+                        )
+                    }
                     // A shadow is a draw: it sets the inside/outside boundary like a background.
                     if (elev != null) seenDraw = true
                     v = v.copy(
@@ -183,6 +189,10 @@ internal object ComposeVisuals {
                             shadowPx = field(element, "shadowElevation") as? Float,
                             clip = field(element, "clip") as? Boolean ?: false,
                             shape = field(element, "shape"),
+                            shadowColorsVisible = shadowColorsVisible(
+                                argb(element, field(element, "ambientShadowColor") as? Long),
+                                argb(element, field(element, "spotShadowColor") as? Long),
+                            ),
                         )
                     } else {
                         blockLayer(element, composeDensity, density, fontScale, measuredSize(info, nodeBounds))
@@ -190,7 +200,9 @@ internal object ComposeVisuals {
                     val alpha = layer.alpha?.takeIf { it.isFinite() }?.coerceIn(0f, 1f)
                     if (alpha != null && alpha < 1f) ownAlpha *= alpha
                     // A layer's shadow is drawn with the layer's own alpha: none at 0.
-                    val shadow = layer.shadowPx?.takeIf { it.isFinite() && it > 0f && layerAlpha() > 0f }?.let { it / density }
+                    val shadow = layer.shadowPx
+                        ?.takeIf { it.isFinite() && it > 0f && layerAlpha() > 0f && layer.shadowColorsVisible }
+                        ?.let { it / density }
                     if (shadow != null) seenDraw = true
                     v = v.copy(
                         alpha = if (ownAlpha < 1f) ownAlpha else v.alpha,
@@ -201,12 +213,15 @@ internal object ComposeVisuals {
                     )
                 }
                 "PaddingElement" -> {
-                    val p = floatArrayOf(
-                        dp(field(element, "top")),
-                        dp(field(element, "bottom")),
+                    // absolutePadding(left, right) keeps left/right in start/end with
+                    // rtlAware = false: in an RTL layout its logical start is the right side.
+                    val (start, end) = logicalSides(
                         dp(field(element, "start")),
                         dp(field(element, "end")),
+                        rtlAware = field(element, "rtlAware") as? Boolean ?: true,
+                        rtl = (invoke0(layoutNode, "getLayoutDirection") as? Enum<*>)?.name == "Rtl",
                     )
+                    val p = floatArrayOf(dp(field(element, "top")), dp(field(element, "bottom")), start, end)
                     if (seenDraw) innerPad = add(innerPad, p) else outerPad = add(outerPad, p)
                 }
                 "PaddingValuesElement" -> {
@@ -244,6 +259,31 @@ internal object ComposeVisuals {
     }
 
     // ---- pure helpers (unit-tested) ----
+
+    /**
+     * The family name for a FontFamily known only by its class. FontFamily.Default is a
+     * DefaultFontFamily, which Compose renders through the same platform default as no
+     * family, so it reports the same "sans-serif".
+     */
+    fun classFamilyName(simpleName: String): String =
+        if (simpleName == "DefaultFontFamily") "sans-serif" else simpleName.lowercase()
+
+    /**
+     * Logical (start, end) for a padding stored as [start]/[end]. An `absolutePadding` stores
+     * left/right there with [rtlAware] false, so in an [rtl] layout the two sides swap.
+     */
+    fun logicalSides(start: Float, end: Float, rtlAware: Boolean, rtl: Boolean): Pair<Float, Float> =
+        if (!rtlAware && rtl) Pair(end, start) else Pair(start, end)
+
+    /**
+     * Whether a shadow with these ambient and spot colors (ARGB, null when unread) shows.
+     * Their alpha is the shadow's opacity, so two fully transparent colors draw nothing; an
+     * unread color is assumed visible (Compose's default is black).
+     */
+    fun shadowColorsVisible(ambientArgb: Int?, spotArgb: Int?): Boolean {
+        fun visible(argb: Int?) = argb == null || (argb ushr 24) != 0
+        return visible(ambientArgb) || visible(spotArgb)
+    }
 
     fun weightName(weight: Int): String =
         when {
@@ -437,7 +477,7 @@ internal object ComposeVisuals {
                 }
                 if (weight == null) weight = invoke0(invoke0(font, "getWeight"), "getWeight") as? Int
             }
-            else -> familyName = family.javaClass.simpleName.lowercase()
+            else -> familyName = classFamilyName(family.javaClass.simpleName)
         }
         return FontInfo(family = familyName, weight = weightName(weight ?: 400), size = spToDp(composeDensity, sizeSp) ?: sizeSp * fontScale)
     }
@@ -480,7 +520,13 @@ internal object ComposeVisuals {
         return colorHex(anchor, packed, alpha = alpha)
     }
 
-    private class LayerProps(val alpha: Float?, val shadowPx: Float?, val clip: Boolean, val shape: Any?)
+    private class LayerProps(
+        val alpha: Float?,
+        val shadowPx: Float?,
+        val clip: Boolean,
+        val shape: Any?,
+        val shadowColorsVisible: Boolean,
+    )
 
     /**
      * The layer properties a `graphicsLayer { … }` block sets, read by running the block on a
@@ -517,6 +563,10 @@ internal object ComposeVisuals {
                 shadowPx = invokePrefix(scope, "getShadowElevation") as? Float,
                 clip = invokePrefix(scope, "getClip") as? Boolean ?: false,
                 shape = invokePrefix(scope, "getShape"),
+                shadowColorsVisible = shadowColorsVisible(
+                    argb(scope, field(scope, "ambientShadowColor") as? Long),
+                    argb(scope, field(scope, "spotShadowColor") as? Long),
+                ),
             )
         } catch (_: Throwable) {
             null
@@ -659,6 +709,19 @@ internal object ComposeVisuals {
             val w = (right - left).toInt()
             val h = (bottom - top).toInt()
             if (w <= 0 || h <= 0) null else Bounds(left.toInt(), top.toInt(), w, h)
+        } catch (_: Throwable) {
+            null
+        }
+    }
+
+    /** A packed Compose Color as ARGB, or null when it can't be converted. */
+    private fun argb(anchor: Any, packed: Long?): Int? {
+        if (packed == null) return null
+        return try {
+            val kt = Class.forName("androidx.compose.ui.graphics.ColorKt", false, anchor.javaClass.classLoader)
+            kt.methods.firstOrNull {
+                it.name.startsWith("toArgb") && it.parameterCount == 1 && it.parameterTypes[0] == java.lang.Long.TYPE
+            }?.invoke(null, packed) as? Int
         } catch (_: Throwable) {
             null
         }

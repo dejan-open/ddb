@@ -159,6 +159,36 @@ class ComposeVisualsTest {
     }
 
     @Test
+    fun absolute_padding_swaps_sides_in_rtl() {
+        // absolutePadding(left = 8, right = 16): start = 8, end = 16, rtlAware = false.
+        assertEquals(Pair(16f, 8f), ComposeVisuals.logicalSides(8f, 16f, rtlAware = false, rtl = true))
+        assertEquals(Pair(8f, 16f), ComposeVisuals.logicalSides(8f, 16f, rtlAware = false, rtl = false))
+        // padding(start, end) is already logical in either direction.
+        assertEquals(Pair(8f, 16f), ComposeVisuals.logicalSides(8f, 16f, rtlAware = true, rtl = true))
+        assertEquals(Pair(8f, 16f), ComposeVisuals.logicalSides(8f, 16f, rtlAware = true, rtl = false))
+    }
+
+    @Test
+    fun default_font_family_is_the_platform_family() {
+        // FontFamily.Default renders like no family at all, which reports sans-serif.
+        assertEquals("sans-serif", ComposeVisuals.classFamilyName("DefaultFontFamily"))
+        assertEquals("customfamily", ComposeVisuals.classFamilyName("CustomFamily"))
+    }
+
+    @Test
+    fun shadow_with_both_colors_transparent_is_invisible() {
+        val black = 0xFF000000.toInt()
+        val transparent = 0x00000000
+        assertEquals(false, ComposeVisuals.shadowColorsVisible(transparent, transparent))
+        assertEquals(false, ComposeVisuals.shadowColorsVisible(0x00FF0000, 0x0000FF00))
+        assertTrue(ComposeVisuals.shadowColorsVisible(black, transparent))
+        assertTrue(ComposeVisuals.shadowColorsVisible(transparent, 0x01000000))
+        // A color that could not be read is assumed to be Compose's default black.
+        assertTrue(ComposeVisuals.shadowColorsVisible(null, transparent))
+        assertTrue(ComposeVisuals.shadowColorsVisible(null, null))
+    }
+
+    @Test
     fun field_reads_private_backing_fields_through_superclasses() {
         open class Base(private val shape: String)
         class Element(private val brush: String) : Base("rounded")
