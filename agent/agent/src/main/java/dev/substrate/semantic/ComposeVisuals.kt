@@ -661,12 +661,24 @@ internal object ComposeVisuals {
                         val fill = (field(painter, "color") as? Long)?.let { colorHex(element, it, alpha = painterAlpha * layerAlpha()) }
                             ?: continue
                         seenDraw = true
+                        // An opaque one over the whole box an earlier fill or image was drawn in
+                        // covers it, by the same rule as a covering background (judged at its own
+                        // opacity, in the same layer): it replaces the color, gradient, the fill's
+                        // corner radius and the image.
+                        val box = ownBounds(info)
+                        val localFill = (field(painter, "color") as? Long)?.let { colorHex(element, it, alpha = painterAlpha) }
+                        val covers = localFill != null && localFill.length == 7 && box != null && box == fillBounds &&
+                            layerAlpha() == fillAlpha && field(element, "colorFilter") == null
                         if (fillBounds == null) {
-                            fillBounds = ownBounds(info)
+                            fillBounds = box
                             fillAlpha = layerAlpha()
                         }
                         v = v.copy(
-                            background = v.background ?: fill,
+                            background = if (covers) fill else v.background ?: fill,
+                            gradient = if (covers) null else v.gradient,
+                            cornerRadius = if (covers && radiusFromFill) null else v.cornerRadius,
+                            imageType = if (covers) null else v.imageType,
+                            imageTint = if (covers) null else v.imageTint,
                             drawBounds = firstDrawBounds(info),
                         )
                         continue
@@ -1621,16 +1633,55 @@ internal object ComposeVisuals {
         // A DpSize packs its width's float bits in the high 32 bits and its height's in the low.
         val minW = java.lang.Float.intBitsToFloat((packed ushr 32).toInt()) * density
         val minH = java.lang.Float.intBitsToFloat((packed and 0xFFFFFFFFL).toInt()) * density
-        val size = (invokePrefix(invoke0(info, "getCoordinates"), "getSize") as? Long)?.let { unpackIntSize(it) }
+        val coordinates = invoke0(info, "getCoordinates")
+        val size = (invokePrefix(coordinates, "getSize") as? Long)?.let { unpackIntSize(it) }
             ?: return bounds
         val padX = ((minW - size.first) / 2f).takeIf { it.isFinite() && it > 0f } ?: 0f
         val padY = ((minH - size.second) / 2f).takeIf { it.isFinite() && it > 0f } ?: 0f
         if (padX == 0f && padY == 0f) return bounds
-        val left = kotlin.math.floor(bounds.x - padX).toInt()
-        val top = kotlin.math.floor(bounds.y - padY).toInt()
-        val right = kotlin.math.ceil(bounds.x + bounds.w + padX).toInt()
-        val bottom = kotlin.math.ceil(bounds.y + bounds.h + padY).toInt()
-        return Bounds(left, top, right - left, bottom - top)
+        // [bounds] is clipped to the ancestors: expand the whole box the click was laid out in
+        // (its window position and measured size), then clip the result to the ancestors again.
+        val origin = positionInWindow(coordinates)
+        val x = origin?.first ?: bounds.x.toFloat()
+        val y = origin?.second ?: bounds.y.toFloat()
+        val w = if (origin != null) size.first else bounds.w
+        val h = if (origin != null) size.second else bounds.h
+        val left = kotlin.math.floor(x - padX).toInt()
+        val top = kotlin.math.floor(y - padY).toInt()
+        val right = kotlin.math.ceil(x + w + padX).toInt()
+        val bottom = kotlin.math.ceil(y + h + padY).toInt()
+        val expanded = Bounds(left, top, right - left, bottom - top)
+        val clip = if (origin != null) invoke0(coordinates, "getParentLayoutCoordinates")?.let { boundsInWindow(it) } else null
+        return if (clip == null) expanded else intersect(expanded, clip) ?: bounds
+    }
+
+    /** LayoutCoordinates.positionInWindow(): the unclipped top-left, an Offset packed as two floats. */
+    private fun positionInWindow(coordinates: Any?): Pair<Float, Float>? =
+        try {
+            if (coordinates == null || invoke0(coordinates, "isAttached") == false) {
+                null
+            } else {
+                val kt = Class.forName("androidx.compose.ui.layout.LayoutCoordinatesKt", false, coordinates.javaClass.classLoader)
+                val m = kt.methods.firstOrNull {
+                    (it.name == "positionInWindow" || it.name.startsWith("positionInWindow-")) && it.parameterCount == 1
+                }
+                (m?.invoke(null, coordinates) as? Long)?.let {
+                    Pair(
+                        java.lang.Float.intBitsToFloat((it ushr 32).toInt()),
+                        java.lang.Float.intBitsToFloat((it and 0xFFFFFFFFL).toInt()),
+                    )
+                }?.takeIf { it.first.isFinite() && it.second.isFinite() }
+            }
+        } catch (_: Throwable) {
+            null
+        }
+
+    private fun intersect(a: Bounds, b: Bounds): Bounds? {
+        val left = maxOf(a.x, b.x)
+        val top = maxOf(a.y, b.y)
+        val right = minOf(a.x + a.w, b.x + b.w)
+        val bottom = minOf(a.y + a.h, b.y + b.h)
+        return if (right > left && bottom > top) Bounds(left, top, right - left, bottom - top) else null
     }
 
     private fun modifierBounds(info: Any, nodeBounds: Bounds?): Bounds? {

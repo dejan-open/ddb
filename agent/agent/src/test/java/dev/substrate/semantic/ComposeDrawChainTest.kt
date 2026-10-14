@@ -775,6 +775,20 @@ class ComposeDrawChainTest {
         assertEquals(Bounds(0, 0, 120, 120), button.clickBounds)
     }
 
+    @Test
+    fun a_small_click_half_outside_its_parent_taps_the_box_centered_on_it_clipped_to_the_parent() {
+        // A 24 dp (48 px at density 2) icon laid out at x 76..124 in a 100 px parent: half of it
+        // is clipped. The 96 px target is centered on the whole icon (x 52..148, y 2..98), then
+        // clipped to the parent.
+        val parent = PlacedCoordinates(WindowRect(0f, 0f, 100f, 100f))
+        val icon = PlacedCoordinates(WindowRect(76f, 26f, 100f, 74f), unclipped = WindowRect(76f, 26f, 124f, 74f), parent = parent)
+        val v = ComposeVisuals.read(
+            TouchNode(TouchViewConfiguration(48f, 48f), SizedInfo(ClickableElement(), icon)),
+            density = 2f, fontScale = 1f, resources = null, nodeBounds = Bounds(76, 26, 24, 48),
+        )
+        assertEquals(Bounds(52, 2, 48, 96), v.clickBounds)
+    }
+
     // A BasicText color producer, and one that writes app state when it is asked for its color.
     class ColorProducer(private val color: Long) {
         fun invoke(): Long = color
@@ -871,5 +885,22 @@ class ComposeDrawChainTest {
         // A layer between the two fades the inner fill over the outer one: red still shows.
         val between = chain(BackgroundElement(red, RectangleShape), GraphicsLayerElement(0.5f), BackgroundElement(blue, RectangleShape))
         assertEquals("#FF0000", between.background)
+    }
+
+    @Test
+    fun an_inner_opaque_color_painter_covers_the_outer_fill() {
+        val box = placed(0, 0, 40)
+        fun chain(vararg elements: Any) = readSized(Bounds(0, 0, 40, 40), 1f, *elements.map { SizedInfo(it, box) }.toTypedArray())
+        // Modifier.background(Red).paint(ColorPainter(Blue)): a blue box.
+        assertEquals("#0000FF", chain(BackgroundElement(red, RectangleShape), PainterElement(ColorPainter(blue))).background)
+        // It also replaces a covered image and the covered fill's corner radius.
+        val image = chain(PainterElement(BitmapPainter()), PainterElement(ColorPainter(blue)))
+        assertNull(image.imageType)
+        assertEquals("#0000FF", image.background)
+        val rounded = chain(BackgroundElement(red, RoundedCornerShape(DpCornerSize(8f))), PainterElement(ColorPainter(blue)))
+        assertNull(rounded.cornerRadius)
+        // A translucent one lets the outer fill through.
+        val halfBlue = 0x800000FFL shl 32
+        assertEquals("#FF0000", chain(BackgroundElement(red, RectangleShape), PainterElement(ColorPainter(halfBlue))).background)
     }
 }
