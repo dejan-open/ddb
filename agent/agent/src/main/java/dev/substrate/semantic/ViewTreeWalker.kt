@@ -538,7 +538,8 @@ object ViewTreeWalker {
         val isClickable = ownClick || (inheritedClickable && !isDisabled)
         val isInput = hasSemanticsKey(config, "EditableText") || hasSemanticsAction(config, "SetText")
         val content = text ?: contentDesc
-        val isImage = visuals.imageType != null || role == "Image"
+        val image = ComposeVisuals.imageFacts(visuals.imageType, role)
+        val isImage = image.isImage
 
         val says = content != null || ownClick || isInput || role != null || (isClickable && text != null)
         val elementBounds = if (says) bounds else visuals.drawBounds ?: bounds
@@ -569,7 +570,7 @@ object ViewTreeWalker {
                     elevation = visuals.elevation, render = null,
                     lineCount = layout?.first, truncated = layout?.second,
                     imageResource = if (isImage) id else null,
-                    imageType = visuals.imageType ?: if (isImage) "vector" else null,
+                    imageType = image.imageType,
                     imagePath = null,
                     border = visuals.border, gradient = visuals.gradient, tapTarget = null,
                 ),

@@ -25,12 +25,18 @@ internal data class ComposeDrawInfo(
     val font: FontInfo? = null,
     val textColor: String? = null,
     val maxLines: Int? = null,
+    /**
+     * The node draws through a custom draw modifier (drawBehind; a Compose Canvas is a Spacer
+     * with one). What it draws can't be read, but it is on screen like any other visual.
+     */
+    val customDraw: Boolean = false,
     /** Bounds of the first drawing modifier, when it differs from the node's (an outer padding). */
     val drawBounds: Bounds? = null,
 ) {
     val draws: Boolean
         // A shadow is drawn on its own, with no background or content under it.
-        get() = background != null || gradient != null || border != null || imageType != null || elevation != null
+        get() = background != null || gradient != null || border != null || imageType != null || elevation != null ||
+            customDraw
 }
 
 internal object ComposeVisuals {
@@ -39,7 +45,29 @@ internal object ComposeVisuals {
     /** Elements that put pixels on screen (a layer at alpha 0 hides those after it). */
     private val DRAWING_ELEMENTS = setOf(
         "BackgroundElement", "BorderModifierNodeElement", "PainterElement", "ShadowGraphicsLayerElement",
+        "DrawBehindElement",
     )
+
+    /**
+     * Modifiers that draw arbitrary content and have no fields to decode: Modifier.drawBehind,
+     * which a Compose Canvas is built on. drawWithContent and drawWithCache are left out, since
+     * they often only wrap drawContent() and draw nothing of their own.
+     */
+    private val CUSTOM_DRAW_ELEMENTS = setOf("DrawBehindElement")
+
+    /** Whether a modifier, known by its element class name, is a custom draw. */
+    fun isCustomDraw(elementName: String): Boolean = elementName in CUSTOM_DRAW_ELEMENTS
+
+    /**
+     * How a Compose node reports an image. It is one when a painter draws an image or its
+     * semantics role is Image, but only the painter tells the format: Role.Image on a Canvas,
+     * custom drawing or a bitmap-backed component is accessibility semantics, so the format
+     * stays unknown (null) rather than a guessed "vector".
+     */
+    data class ImageFacts(val isImage: Boolean, val imageType: String?)
+
+    fun imageFacts(painterImageType: String?, role: String?): ImageFacts =
+        ImageFacts(isImage = painterImageType != null || role == "Image", imageType = painterImageType)
 
     /**
      * Text modifiers whose style and color are read. Text in a SelectionContainer is a
@@ -84,6 +112,13 @@ internal object ComposeVisuals {
             val name = element.javaClass.simpleName
             // Inside a layer at alpha 0 nothing is drawn; modifiers before it still are.
             if (layerAlpha() <= 0f && name in DRAWING_ELEMENTS) continue
+            if (isCustomDraw(name)) {
+                // A draw like a background: it sets the inside/outside padding boundary and the
+                // draw bounds, and inside an alpha-0 layer it was skipped above.
+                seenDraw = true
+                v = v.copy(customDraw = true, drawBounds = firstDrawBounds(info))
+                continue
+            }
             when (name) {
                 "BackgroundElement" -> {
                     // background(brush, alpha) scales the brush only; the color overload has none.

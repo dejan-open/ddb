@@ -1,6 +1,7 @@
 package dev.substrate.semantic
 
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
@@ -197,5 +198,26 @@ class ComposeVisualsTest {
         assertEquals("rounded", ComposeVisuals.field(e, "shape"))
         assertNull(ComposeVisuals.field(e, "missing"))
         assertNull(ComposeVisuals.field(null, "brush"))
+    }
+
+    @Test
+    fun drawBehind_is_a_custom_draw_and_counts_as_a_visual() {
+        // A Compose Canvas is a Spacer with Modifier.drawBehind: nothing else marks it as drawn.
+        assertTrue(ComposeVisuals.isCustomDraw("DrawBehindElement"))
+        assertFalse(ComposeVisuals.isCustomDraw("DrawWithContentElement"))
+        assertFalse(ComposeVisuals.isCustomDraw("PaddingElement"))
+        assertFalse(ComposeDrawInfo().draws)
+        assertTrue(ComposeDrawInfo(customDraw = true).draws)
+    }
+
+    @Test
+    fun image_role_does_not_set_an_image_format() {
+        // Role.Image with no recognised painter (a Canvas, custom drawing): an image, format unknown.
+        assertEquals(ComposeVisuals.ImageFacts(isImage = true, imageType = null), ComposeVisuals.imageFacts(null, "Image"))
+        // Only the painter tells the format.
+        assertEquals(ComposeVisuals.ImageFacts(true, "raster"), ComposeVisuals.imageFacts("raster", "Image"))
+        assertEquals(ComposeVisuals.ImageFacts(true, "vector"), ComposeVisuals.imageFacts("vector", null))
+        assertEquals(ComposeVisuals.ImageFacts(false, null), ComposeVisuals.imageFacts(null, "Button"))
+        assertEquals(ComposeVisuals.ImageFacts(false, null), ComposeVisuals.imageFacts(null, null))
     }
 }
