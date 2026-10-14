@@ -65,6 +65,23 @@ class ViewDrawableTest {
     }
 
     @Test
+    fun a_stroke_that_leaves_an_empty_rect_draws_nothing() {
+        // A 40 px box with a 40 px stroke: inset by half the stroke on each side, the rect is
+        // empty and GradientDrawable.draw returns before it paints anything.
+        val drawable = GradientDrawable().apply {
+            setColor(Color.RED)
+            setStroke(40, Color.BLUE)
+            cornerRadius = 8f
+        }
+        val drawn = background(sized(drawable, 40, 40))!!
+        assertNull(drawn.fill)
+        assertNull(drawn.border)
+        assertNull(drawn.gradient)
+        assertNull(drawn.cornerRadiusPx)
+        assertFalse(drawn.customDraw)
+    }
+
+    @Test
     fun a_gradient_fill_is_read_at_the_drawable_state() {
         val drawable = GradientDrawable().apply { color = pressedRed() }
         assertEquals("#0000FF", ViewTreeWalker.gradientFill(drawable))

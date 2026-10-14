@@ -108,6 +108,8 @@ object ViewTreeWalker {
             view: View,
             parentExternal: Boolean,
             parentHidden: Boolean,
+            // The product of every ancestor's alpha: RenderNode fades the whole subtree by it.
+            parentAlpha: Float = 1f,
         ) {
             val resId = extractResourceId(view)
             val tag = resId ?: view.javaClass.simpleName
@@ -178,7 +180,10 @@ object ViewTreeWalker {
                 return
             }
 
-            val element = buildElement(view, bounds, density, nextZ(), effectiveExternal)
+            // The alpha this View draws at: its own times every ancestor's (View.setAlpha sets it
+            // on the View's RenderNode, which fades everything it and its children draw).
+            val alpha = parentAlpha * view.alpha
+            val element = buildElement(view, bounds, density, nextZ(), effectiveExternal, alpha = alpha)
             elements.add(element)
             val c = element.content?.take(30) ?: "null"
             log.appendLine(
@@ -198,7 +203,7 @@ object ViewTreeWalker {
                     if (!ok && view is ViewGroup) {
                         val group = view as ViewGroup
                         for (i in 0 until group.childCount) {
-                            walkView(group.getChildAt(i), effectiveExternal, false)
+                            walkView(group.getChildAt(i), effectiveExternal, false, alpha)
                         }
                     }
                     log.appendLine("COMPOSE_DESCENT root=$tag ok=$ok emitted=${elements.size - before}")
@@ -211,7 +216,7 @@ object ViewTreeWalker {
             if (isGroup) {
                 val group = view as ViewGroup
                 for (i in 0 until group.childCount) {
-                    walkView(group.getChildAt(i), effectiveExternal, false)
+                    walkView(group.getChildAt(i), effectiveExternal, false, alpha)
                 }
             }
         }
@@ -276,7 +281,8 @@ object ViewTreeWalker {
     /**
      * One View as an element. A [hidden] view (INVISIBLE, at alpha 0, or under such a parent)
      * draws nothing, so it is reported as structure only: its type, bounds, text and semantics,
-     * with no color, background, corner radius, border, gradient, shadow or image.
+     * with no color, background, corner radius, border, gradient, shadow or image. Every color it
+     * draws is faded by [alpha], the View's own alpha times every ancestor's ([ComposeVisuals.scaleAlpha]).
      */
     private fun buildElement(
         view: View,
@@ -285,6 +291,7 @@ object ViewTreeWalker {
         z: Int,
         isExternal: Boolean,
         hidden: Boolean = false,
+        alpha: Float = 1f,
     ): SemanticElement {
         val resourceId = extractResourceId(view)
         val content: String?
@@ -301,14 +308,14 @@ object ViewTreeWalker {
             is EditText -> {
                 content = view.text?.toString()?.ifEmpty { view.hint?.toString() }
                 font = extractFont(view, density)
-                textColor = visibleColor(view.currentTextColor)
+                textColor = visibleColor(ComposeVisuals.scaleAlpha(view.currentTextColor, alpha))
                 type = "input"
             }
 
             is TextView -> {
                 content = view.text?.toString()
                 font = extractFont(view, density)
-                textColor = visibleColor(view.currentTextColor)
+                textColor = visibleColor(ComposeVisuals.scaleAlpha(view.currentTextColor, alpha))
                 lineCount = view.lineCount.takeIf { it > 0 }
                 truncated =
                     view.layout?.let { layout ->
@@ -323,7 +330,7 @@ object ViewTreeWalker {
                 // A transparent tint that replaces the image's pixels leaves no image on screen:
                 // no image block, no file written for it, no tint.
                 if (!hidden && !imageTintHides(view)) {
-                    textColor = imageTint(view)
+                    textColor = imageTint(view, alpha)
                     val imgInfo = extractImageInfo(view, resourceId ?: "image_${bounds.x}_${bounds.y}")
                     imageResource = imgInfo?.first
                     imageType = imgInfo?.second
@@ -381,8 +388,8 @@ object ViewTreeWalker {
             }
 
         val elev = view.elevation + view.translationZ
-        val elevDp = if (elev > 0f && !hidden && shadowColorsVisible(view)) elev / density else null
-        val background = if (hidden) null else viewBackground(view, density)
+        val elevDp = if (elev > 0f && !hidden && shadowColorsVisible(view, alpha)) elev / density else null
+        val background = if (hidden) null else viewBackground(view, density, alpha)
 
         return SemanticElement(
             id = id,
@@ -1253,11 +1260,15 @@ object ViewTreeWalker {
     /**
      * Whether a View's shadow shows, by its colors (outlineAmbientShadowColor and
      * outlineSpotShadowColor, API 28; black before): two fully transparent ones draw nothing,
-     * the rule Compose shadows go through ([ComposeVisuals.shadowColorsVisible]).
+     * the rule Compose shadows go through ([ComposeVisuals.shadowColorsVisible]), each faded by
+     * the View's [alpha] first.
      */
-    internal fun shadowColorsVisible(view: View): Boolean =
+    internal fun shadowColorsVisible(view: View, alpha: Float = 1f): Boolean =
         Build.VERSION.SDK_INT < 28 ||
-            ComposeVisuals.shadowColorsVisible(view.outlineAmbientShadowColor, view.outlineSpotShadowColor)
+            ComposeVisuals.shadowColorsVisible(
+                ComposeVisuals.scaleAlpha(view.outlineAmbientShadowColor, alpha),
+                ComposeVisuals.scaleAlpha(view.outlineSpotShadowColor, alpha),
+            )
 
     /**
      * The layer of a background that draws. A RippleDrawable draws every layer but its mask
@@ -1288,15 +1299,16 @@ object ViewTreeWalker {
     /**
      * A View's background as it draws: the layer that draws ([drawnLayer]), with the View's
      * background tint ([backgroundTint]). A ColorDrawable is a fill; a GradientDrawable is read
-     * by [gradientBackground]. Null for any other drawable, or no background.
+     * by [gradientBackground]. Every color is faded by the View's [alpha] (its own times every
+     * ancestor's), as its RenderNode draws it. Null for any other drawable, or no background.
      */
-    internal fun viewBackground(view: View, density: Float): DrawnBackground? {
+    internal fun viewBackground(view: View, density: Float, alpha: Float = 1f): DrawnBackground? {
         val layer = drawnLayer(view.background) ?: return null
         val tint = backgroundTint(view, layer)
         return when (layer) {
             // getColor() is the color with the drawable's alpha already applied (setAlpha).
-            is ColorDrawable -> DrawnBackground(fill = visibleColor(tinted(layer.color, tint)))
-            is GradientDrawable -> gradientBackground(layer, density, tint, view.width, view.height)
+            is ColorDrawable -> DrawnBackground(fill = visibleColor(ComposeVisuals.scaleAlpha(tinted(layer.color, tint), alpha)))
+            is GradientDrawable -> gradientBackground(layer, density, tint, view.width, view.height, alpha)
             else -> null
         }
     }
@@ -1340,13 +1352,22 @@ object ViewTreeWalker {
      * LINE draws only its stroke, as a line across the middle, and a RING only its ring path:
      * neither is a fill, border or gradient of the box, and either is a custom draw when what it
      * draws is visible. [viewW] × [viewH] is the View's size, the drawable's bounds until the
-     * View sets them.
+     * View sets them. Every color is faded by the View's [alpha]. A rect the stroke inset leaves
+     * empty (a stroke as wide as the smaller side) draws nothing: draw returns before it paints.
      */
-    internal fun gradientBackground(drawable: GradientDrawable, density: Float, tint: Tint?, viewW: Int, viewH: Int): DrawnBackground {
+    internal fun gradientBackground(
+        drawable: GradientDrawable,
+        density: Float,
+        tint: Tint?,
+        viewW: Int,
+        viewH: Int,
+        alpha: Float = 1f,
+    ): DrawnBackground {
         val rect = drawnRectSize(drawable, viewW, viewH)
-        val fill = gradientFill(drawable, tint)
-        val border = gradientBorder(drawable, density, tint)
-        val gradient = gradientInfo(drawable, tint)
+        if (rect != null && (rect.first <= 0f || rect.second <= 0f)) return DrawnBackground()
+        val fill = gradientFill(drawable, tint, alpha)
+        val border = gradientBorder(drawable, density, tint, alpha)
+        val gradient = gradientInfo(drawable, tint, alpha)
         // A shape with no visible fill, gradient or stroke puts no pixels on screen, so its
         // corners round nothing; a transparent fill with a visible stroke still has them.
         val draws = fill != null || gradient != null || border != null
@@ -1492,14 +1513,14 @@ object ViewTreeWalker {
      * null)`), so a stroke-only shape is filled with the tint. Null when nothing visible is
      * filled ([visibleColor]): a gradient fill, no fill, or a fully transparent one.
      */
-    internal fun gradientFill(drawable: GradientDrawable, tint: Tint? = null): String? {
+    internal fun gradientFill(drawable: GradientDrawable, tint: Tint? = null, alpha: Float = 1f): String? {
         val solid = stateColor(drawable.color, drawable.state)
         val fill = when {
             solid != null -> modulate(solid, drawable.alpha)
             tint != null && drawable.colors == null -> drawable.alpha shl 24
             else -> return null
         }
-        return visibleColor(tinted(fill, tint))
+        return visibleColor(ComposeVisuals.scaleAlpha(tinted(fill, tint), alpha))
     }
 
     /**
@@ -1551,17 +1572,17 @@ object ViewTreeWalker {
     /**
      * The stroke a GradientDrawable draws, as a border: what its stroke paint holds
      * ([paintStroke]), or, when that paint can't be read, what its GradientState holds
-     * ([stateStroke]), its alpha modulated by the drawable's and under the background [tint].
-     * Null when it draws no stroke.
+     * ([stateStroke]), its alpha modulated by the drawable's, under the background [tint] and
+     * faded by the View's [alpha]. Null when it draws no stroke.
      */
-    internal fun gradientBorder(drawable: GradientDrawable, density: Float, tint: Tint? = null): BorderInfo? {
+    internal fun gradientBorder(drawable: GradientDrawable, density: Float, tint: Tint? = null, alpha: Float = 1f): BorderInfo? {
         val paint = try {
             GradientDrawable::class.java.getDeclaredField("mStrokePaint").apply { isAccessible = true }.get(drawable)
         } catch (_: Throwable) {
-            return stateStroke(drawable.constantState, drawable.state, density, drawable.alpha, tint)
+            return stateStroke(drawable.constantState, drawable.state, density, drawable.alpha, tint, alpha)
         }
         // No stroke paint: setStroke was never called, and nothing is stroked.
-        return (paint as? android.graphics.Paint)?.let { paintStroke(it, density, drawable.alpha, tint) }
+        return (paint as? android.graphics.Paint)?.let { paintStroke(it, density, drawable.alpha, tint, alpha) }
     }
 
     /**
@@ -1569,10 +1590,16 @@ object ViewTreeWalker {
      * the stroke width and its color to the stroke's color list resolved at the drawable's
      * current state (setStroke, then onStateChange on every state change), and strokes with it
      * only when its width is above 0 (draw: `haveStroke = ... mStrokePaint.getStrokeWidth() > 0`),
-     * at its alpha modulated by the drawable's [drawableAlpha] and under its [tint].
+     * at its alpha modulated by the drawable's [drawableAlpha], under its [tint] and faded by the
+     * View's [alpha].
      */
-    internal fun paintStroke(paint: android.graphics.Paint, density: Float, drawableAlpha: Int = 255, tint: Tint? = null): BorderInfo? =
-        strokeBorder(paint.strokeWidth, tinted(modulate(paint.color, drawableAlpha), tint), density)
+    internal fun paintStroke(
+        paint: android.graphics.Paint,
+        density: Float,
+        drawableAlpha: Int = 255,
+        tint: Tint? = null,
+        alpha: Float = 1f,
+    ): BorderInfo? = strokeBorder(paint.strokeWidth, ComposeVisuals.scaleAlpha(tinted(modulate(paint.color, drawableAlpha), tint), alpha), density)
 
     /**
      * A stroke read from a GradientDrawable's GradientState ([state], the drawable's
@@ -1587,21 +1614,23 @@ object ViewTreeWalker {
         density: Float,
         drawableAlpha: Int = 255,
         tint: Tint? = null,
+        alpha: Float = 1f,
     ): BorderInfo? {
         if (state == null) return null
         val width = gradientStateField(state, "mStrokeWidth") as? Int ?: return null
         val colors = gradientStateField(state, "mStrokeColors") as? android.content.res.ColorStateList
         val color = stateColor(colors, drawableState) ?: android.graphics.Color.TRANSPARENT
-        return strokeBorder(width.toFloat(), tinted(modulate(color, drawableAlpha), tint), density)
+        return strokeBorder(width.toFloat(), ComposeVisuals.scaleAlpha(tinted(modulate(color, drawableAlpha), tint), alpha), density)
     }
 
     /**
      * An ImageView's tint, resolved as its drawable resolves it at the view's current state
      * (Drawable.updateTintFilter: `getColorForState(getState(), Color.TRANSPARENT)`; ImageView
-     * keeps a stateful drawable's state in step with its own), as its hex ([visibleColor]). Null
-     * with no tint, or a fully transparent one.
+     * keeps a stateful drawable's state in step with its own), faded by the View's [alpha], as its
+     * hex ([visibleColor]). Null with no tint, or a fully transparent one.
      */
-    internal fun imageTint(view: ImageView): String? = imageTintColor(view)?.let { visibleColor(it) }
+    internal fun imageTint(view: ImageView, alpha: Float = 1f): String? =
+        imageTintColor(view)?.let { visibleColor(ComposeVisuals.scaleAlpha(it, alpha)) }
 
     private fun imageTintColor(view: ImageView): Int? =
         stateColor(view.imageTintList, view.drawableState, android.graphics.Color.TRANSPARENT)
@@ -1634,11 +1663,11 @@ object ViewTreeWalker {
     /**
      * A GradientDrawable's gradient: its stops (getColors()) as its fill paint draws them, each
      * with its alpha modulated by the drawable's (draw sets the paint to opaque black under the
-     * shader, then modulates its alpha) and under the background [tint]. Null with no gradient
-     * to report ([gradientStops]).
+     * shader, then modulates its alpha), under the background [tint] and faded by the View's
+     * [alpha]. Null with no gradient to report ([gradientStops]).
      */
-    internal fun gradientInfo(drawable: GradientDrawable, tint: Tint? = null): GradientInfo? {
-        val colors = drawable.colors?.map { tinted(modulate(it, drawable.alpha), tint) }?.toIntArray()
+    internal fun gradientInfo(drawable: GradientDrawable, tint: Tint? = null, alpha: Float = 1f): GradientInfo? {
+        val colors = drawable.colors?.map { ComposeVisuals.scaleAlpha(tinted(modulate(it, drawable.alpha), tint), alpha) }?.toIntArray()
         val stops = gradientStops(colors) ?: return null
 
         val type =

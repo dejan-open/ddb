@@ -172,4 +172,40 @@ class ViewWalkTest {
         assertEquals(6f, elements.getValue("button2").elevation!!, 0f)
         assertEquals(6f, elements.getValue("button3").elevation!!, 0f)
     }
+
+    @Test
+    fun a_view_draws_at_its_own_alpha_times_every_ancestors() {
+        val elements = walk { context ->
+            listOf(
+                FrameLayout(context).apply {
+                    id = android.R.id.widget_frame
+                    alpha = 0.5f
+                    addView(
+                        View(context).apply {
+                            id = android.R.id.icon1
+                            alpha = 0.5f
+                            background = ColorDrawable(Color.RED)
+                        },
+                        FrameLayout.LayoutParams(40, 40),
+                    )
+                    addView(
+                        TextView(context).apply {
+                            id = android.R.id.text1
+                            text = "Faded"
+                            setTextColor(Color.RED)
+                            background = shape()
+                        },
+                        FrameLayout.LayoutParams(40, 40),
+                    )
+                },
+            )
+        }
+        // 0.5 × 0.5: the opaque red fill draws at alpha 0.25 (0x40).
+        assertEquals("#40FF0000", elements.getValue("icon1").background)
+        // Under the parent's 0.5 only: fill, stroke and text color all at 0x80.
+        val text = elements.getValue("text1")
+        assertEquals("#80FF0000", text.background)
+        assertEquals(BorderInfo(4f, "#800000FF"), text.border)
+        assertEquals("#80FF0000", text.color)
+    }
 }
