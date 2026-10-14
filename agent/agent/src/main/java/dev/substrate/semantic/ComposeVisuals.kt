@@ -478,6 +478,9 @@ internal object ComposeVisuals {
         // The window box the first fill or image was drawn in. Every later modifier draws
         // inside it, so an opaque rectangular fill over this whole box covers all of them.
         var fillBounds: Bounds? = null
+        // The layer alpha the first fill or image was drawn at. A later fill covers it only
+        // inside the same layers: a layer between the two fades the inner fill over the outer.
+        var fillAlpha = 1f
         // Whether the corner radius came from a fill, which a covering fill replaces (a
         // border's or an enclosing layer's still shows).
         var radiusFromFill = false
@@ -585,11 +588,19 @@ internal object ComposeVisuals {
                     // covers it: the inner one is what shows, and everything recorded for the
                     // covered draws (color, gradient, corner radius, image) is replaced by it.
                     // A translucent one, a shaped one or one in another box only draws over part.
+                    // Whether it covers is decided at its own opacity, before the layer and host
+                    // alpha: inside graphicsLayer(alpha = 0.5f) an opaque fill still hides what it
+                    // is drawn over, and the faded result (the scaled solid) is what shows.
                     val box = ownBounds(info)
                     val shape = field(element, "shape")
-                    val covers = solid != null && solid.length == 7 && box != null && box == fillBounds &&
-                        rectangular(shape)
-                    if (fillBounds == null) fillBounds = box
+                    val localSolid = (field(element, "color") as? Long)?.let { colorHex(element, it) }
+                        ?: if (brushAlpha > 0f) solidBrushHex(brush, element, brushAlpha) else null
+                    val covers = localSolid != null && localSolid.length == 7 && box != null && box == fillBounds &&
+                        layerAlpha() == fillAlpha && rectangular(shape)
+                    if (fillBounds == null) {
+                        fillBounds = box
+                        fillAlpha = layerAlpha()
+                    }
                     val radius = cornerRadius(shape, density, measuredSize(info, nodeBounds))
                     val keptRadius = if (covers && (v.cornerRadius == null || radiusFromFill)) {
                         radius
@@ -650,7 +661,10 @@ internal object ComposeVisuals {
                         val fill = (field(painter, "color") as? Long)?.let { colorHex(element, it, alpha = painterAlpha * layerAlpha()) }
                             ?: continue
                         seenDraw = true
-                        if (fillBounds == null) fillBounds = ownBounds(info)
+                        if (fillBounds == null) {
+                            fillBounds = ownBounds(info)
+                            fillAlpha = layerAlpha()
+                        }
                         v = v.copy(
                             background = v.background ?: fill,
                             drawBounds = firstDrawBounds(info),
@@ -658,7 +672,10 @@ internal object ComposeVisuals {
                         continue
                     }
                     seenDraw = true
-                    if (fillBounds == null) fillBounds = ownBounds(info)
+                    if (fillBounds == null) {
+                        fillBounds = ownBounds(info)
+                        fillAlpha = layerAlpha()
+                    }
                     val type = if (coil) "loaded" else painterType(painter)
                     if (type != null && v.imageType == null) {
                         v = v.copy(

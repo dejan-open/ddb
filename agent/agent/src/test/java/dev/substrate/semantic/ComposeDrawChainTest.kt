@@ -843,4 +843,33 @@ class ComposeDrawChainTest {
         // Without the covering fill the rounded red one keeps its corners.
         assertEquals(8f, chain(BackgroundElement(red, rounded)).cornerRadius!!, 0f)
     }
+
+    @Test
+    fun an_inner_opaque_background_covers_inside_a_translucent_layer() {
+        val box = placed(0, 0, 40)
+        fun chain(vararg elements: Any) = readSized(Bounds(0, 0, 40, 40), 1f, *elements.map { SizedInfo(it, box) }.toTypedArray())
+        // Modifier.graphicsLayer(alpha = 0.5f).background(Red).background(Blue): blue covers red
+        // inside the layer, and the layer fades the blue.
+        val layered = chain(GraphicsLayerElement(0.5f), BackgroundElement(red, RectangleShape), BackgroundElement(blue, RectangleShape))
+        assertEquals("#800000FF", layered.background)
+    }
+
+    @Test
+    fun an_inner_opaque_background_covers_a_painter_inside_a_translucent_layer() {
+        val box = placed(0, 0, 40)
+        fun chain(vararg elements: Any) = readSized(Bounds(0, 0, 40, 40), 1f, *elements.map { SizedInfo(it, box) }.toTypedArray())
+        // Modifier.graphicsLayer(alpha = 0.5f).paint(bitmap).background(Blue): no image shows.
+        val painted = chain(GraphicsLayerElement(0.5f), PainterElement(BitmapPainter()), BackgroundElement(blue, RectangleShape))
+        assertNull(painted.imageType)
+        assertEquals("#800000FF", painted.background)
+    }
+
+    @Test
+    fun a_layer_between_two_fills_keeps_the_outer_one_showing() {
+        val box = placed(0, 0, 40)
+        fun chain(vararg elements: Any) = readSized(Bounds(0, 0, 40, 40), 1f, *elements.map { SizedInfo(it, box) }.toTypedArray())
+        // A layer between the two fades the inner fill over the outer one: red still shows.
+        val between = chain(BackgroundElement(red, RectangleShape), GraphicsLayerElement(0.5f), BackgroundElement(blue, RectangleShape))
+        assertEquals("#FF0000", between.background)
+    }
 }
