@@ -505,6 +505,8 @@ internal object ComposeVisuals {
         val painterElements = elementNames.count { it == "ContentPainterElement" }
         val painterNodes by lazy { chainNodes(layoutNode, "ContentPainterNode") }
         var painterIndex = 0
+        // The node's layout direction: a RoundedCornerShape's start corners sit on the right in RTL.
+        val rtl by lazy { (invoke0(layoutNode, "getLayoutDirection") as? Enum<*>)?.name == "Rtl" }
         for (info in infos) {
             if (info == null) continue
             val element = invoke0(info, "getModifier") ?: continue
@@ -602,7 +604,7 @@ internal object ComposeVisuals {
                         fillBounds = box
                         fillAlpha = layerAlpha()
                     }
-                    val radius = cornerRadius(shape, density, measuredSize(info, nodeBounds))
+                    val radius = cornerRadius(shape, density, measuredSize(info, nodeBounds), rtl)
                     val keptRadius = if (covers && (v.cornerRadius == null || radiusFromFill)) {
                         radius
                     } else {
@@ -634,7 +636,7 @@ internal object ComposeVisuals {
                     if (v.border == null) {
                         v = v.copy(
                             border = BorderInfo(width = width, color = color),
-                            cornerRadius = v.cornerRadius ?: cornerRadius(field(element, "shape"), density, measuredSize(info, nodeBounds)),
+                            cornerRadius = v.cornerRadius ?: cornerRadius(field(element, "shape"), density, measuredSize(info, nodeBounds), rtl),
                             drawBounds = firstDrawBounds(info),
                         )
                     }
@@ -727,7 +729,7 @@ internal object ComposeVisuals {
                     v = v.copy(
                         elevation = v.elevation ?: elev,
                         cornerRadius = v.cornerRadius
-                            ?: if (shapes) cornerRadius(field(element, "shape"), density, measuredSize(info, nodeBounds)) else null,
+                            ?: if (shapes) cornerRadius(field(element, "shape"), density, measuredSize(info, nodeBounds), rtl) else null,
                         drawBounds = if (elev != null) firstDrawBounds(info) else v.drawBounds,
                     )
                 }
@@ -767,7 +769,7 @@ internal object ComposeVisuals {
                         alpha = if (ownAlpha < 1f) ownAlpha else v.alpha,
                         elevation = v.elevation ?: shadow,
                         cornerRadius = v.cornerRadius
-                            ?: if (shapes) cornerRadius(layer.shape, density, measuredSize(info, nodeBounds)) else null,
+                            ?: if (shapes) cornerRadius(layer.shape, density, measuredSize(info, nodeBounds), rtl) else null,
                         drawBounds = if (shadow != null) firstDrawBounds(info) else v.drawBounds,
                     )
                 }
@@ -1591,12 +1593,14 @@ internal object ComposeVisuals {
     }
 
     /**
-     * Radius in dp of the top-start corner, the same corner the View path reports, for a rounded
-     * shape drawn at [size]: the measured size of the modifier's coordinator, the local size
-     * Compose resolves the shape against (before any layer transform or ancestor clip, which
-     * window bounds include). Null for any shape that is not rounded.
+     * Radius in dp of the physical top-left corner, the same corner the View path reports, for a
+     * rounded shape drawn at [size]: the measured size of the modifier's coordinator, the local
+     * size Compose resolves the shape against (before any layer transform or ancestor clip, which
+     * window bounds include). In an [rtl] layout a RoundedCornerShape draws its topEnd corner at
+     * the top left; an AbsoluteRoundedCornerShape keeps topStart there in either direction. Null
+     * for any shape that is not rounded.
      */
-    private fun cornerRadius(shape: Any?, density: Float, size: Pair<Int, Int>?): Float? {
+    private fun cornerRadius(shape: Any?, density: Float, size: Pair<Int, Int>?, rtl: Boolean): Float? {
         if (shape == null || shape.javaClass.simpleName !in ROUNDED_SHAPES) return null
         fun cornerPx(name: String): Float? {
             val corner = field(shape, name) ?: return null
@@ -1606,7 +1610,8 @@ internal object ComposeVisuals {
         }
         val topStart = cornerPx("topStart") ?: return null
         val drawn = drawnCornersPx(topStart, cornerPx("topEnd"), cornerPx("bottomEnd"), cornerPx("bottomStart"), size)
-        return (drawn[0] / density).takeIf { it.isFinite() && it > 0f }
+        val topLeft = if (rtl && shape.javaClass.simpleName == "RoundedCornerShape") drawn[1] else drawn[0]
+        return (topLeft / density).takeIf { it.isFinite() && it > 0f }
     }
 
     /**

@@ -290,6 +290,33 @@ class ComposeDrawChainTest {
         assertEquals(10f * 100f / 120f, card.cornerRadius!!, 1e-4f)
     }
 
+    enum class LayoutDirection { Ltr, Rtl }
+
+    class DirectedNode(private val direction: LayoutDirection, private vararg val infos: SizedInfo) {
+        fun getModifierInfo(): List<Any> = infos.toList()
+        fun getLayoutDirection(): Any = direction
+    }
+
+    private fun readDirected(direction: LayoutDirection, vararg infos: SizedInfo): ComposeDrawInfo =
+        ComposeVisuals.read(DirectedNode(direction, *infos), density = 1f, fontScale = 1f, resources = null, nodeBounds = null)
+
+    @Test
+    fun the_reported_corner_is_the_physical_top_left_in_rtl() {
+        val none = DpCornerSize(0f)
+        // RoundedCornerShape(topStart = 16.dp, topEnd = 0.dp): in RTL Compose draws topEnd at the
+        // top left, so there is no top-left radius; in LTR it is topStart's 16.
+        val startOnly = RoundedCornerShape(DpCornerSize(16f), none, none, none)
+        assertNull(readDirected(LayoutDirection.Rtl, SizedInfo(ShadowGraphicsLayerElement(4f, startOnly), measured(100, 100))).cornerRadius)
+        assertEquals(16f, readDirected(LayoutDirection.Ltr, SizedInfo(ShadowGraphicsLayerElement(4f, startOnly), measured(100, 100))).cornerRadius!!, 0f)
+        // topStart = 0, topEnd = 16 in RTL: the top-left corner is 16.
+        val endOnly = RoundedCornerShape(none, DpCornerSize(16f), none, none)
+        assertEquals(16f, readDirected(LayoutDirection.Rtl, SizedInfo(ShadowGraphicsLayerElement(4f, endOnly), measured(100, 100))).cornerRadius!!, 0f)
+        // An AbsoluteRoundedCornerShape is physical in either direction: its topLeft (stored as topStart).
+        val absolute = AbsoluteRoundedCornerShape(DpCornerSize(8f), none)
+        assertEquals(8f, readDirected(LayoutDirection.Rtl, SizedInfo(ShadowGraphicsLayerElement(4f, absolute), measured(100, 100))).cornerRadius!!, 0f)
+        assertEquals(8f, readDirected(LayoutDirection.Ltr, SizedInfo(ShadowGraphicsLayerElement(4f, absolute), measured(100, 100))).cornerRadius!!, 0f)
+    }
+
     @Test
     fun cut_corners_are_not_a_corner_radius() {
         val cut = CutCornerShape(DpCornerSize(8f), DpCornerSize(8f))

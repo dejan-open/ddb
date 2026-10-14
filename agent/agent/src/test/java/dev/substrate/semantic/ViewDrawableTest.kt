@@ -187,6 +187,22 @@ class ViewDrawableTest {
     }
 
     @Test
+    fun a_later_non_covering_ripple_layer_adds_what_it_draws() {
+        val highlight = ColorStateList.valueOf(Color.GRAY)
+        // A red fill layer, then a transparent shape with a blue stroke: both draw, so the
+        // background is red with a blue border.
+        val stroke = GradientDrawable().apply {
+            setColor(Color.TRANSPARENT)
+            setStroke(2, Color.BLUE)
+        }
+        val bordered = RippleDrawable(highlight, ColorDrawable(Color.RED), null).apply { addLayer(stroke) }
+        val drawn = background(sized(bordered), density = 2f)!!
+        assertEquals("#FF0000", drawn.fill)
+        assertEquals(BorderInfo(1f, "#0000FF"), drawn.border)
+        assertNull(drawn.cornerRadiusPx)
+    }
+
+    @Test
     fun an_explicit_drawable_color_filter_recolors_what_it_draws() {
         // A red shape with a green stroke and a blue SRC_IN PorterDuffColorFilter draws blue.
         val shape = GradientDrawable().apply {

@@ -1309,9 +1309,10 @@ object ViewTreeWalker {
     /**
      * A View's background as it draws, with the View's background tint ([backgroundTint]). A
      * ColorDrawable is a fill; a GradientDrawable is read by [gradientBackground]. A
-     * RippleDrawable draws its non-mask layers in order: the first one, unless a later one over
-     * the same bounds covers it (an opaque, square fill with no gradient, by the cover rule the
-     * Compose path uses). Every color is faded by the View's [alpha] (its own times every
+     * RippleDrawable draws its non-mask layers in order: a later one over the same bounds that
+     * covers the earlier ones (an opaque, square fill with no gradient, by the cover rule the
+     * Compose path uses) replaces them; any other later layer adds what it visibly draws over
+     * them ([mergeLayer]). Every color is faded by the View's [alpha] (its own times every
      * ancestor's), as its RenderNode draws it. Null for any other drawable, or no background.
      */
     internal fun viewBackground(view: View, density: Float, alpha: Float = 1f): DrawnBackground? {
@@ -1326,9 +1327,33 @@ object ViewTreeWalker {
             if (chosen < 0 || (covers(layerBackground(view, layer, density)) && sameLayerBounds(background, chosen, i))) {
                 chosen = i
                 drawn = layerBackground(view, layer, density, alpha)
+            } else {
+                drawn = mergeLayer(drawn, layerBackground(view, layer, density, alpha))
             }
         }
         return drawn
+    }
+
+    /**
+     * [over], a later ripple layer that does not cover [under], drawn on top of it: its border
+     * replaces the earlier one, and its fill or gradient shows where [under] has neither; a
+     * transparent or absent field leaves [under]'s. The one corner radius goes with the fill
+     * (or gradient) when there is one, else with the border.
+     */
+    private fun mergeLayer(under: DrawnBackground?, over: DrawnBackground?): DrawnBackground? {
+        if (under == null) return over
+        if (over == null) return under
+        val takesPaint = under.fill == null && under.gradient == null && (over.fill != null || over.gradient != null)
+        val fill = if (takesPaint) over.fill else under.fill
+        val gradient = if (takesPaint) over.gradient else under.gradient
+        val border = over.border ?: under.border
+        val radius = when {
+            takesPaint -> over.cornerRadiusPx
+            fill != null || gradient != null -> under.cornerRadiusPx
+            over.border != null -> over.cornerRadiusPx
+            else -> under.cornerRadiusPx
+        }
+        return DrawnBackground(fill, radius, border, gradient, under.customDraw || over.customDraw)
     }
 
     /** Whether a drawn background hides everything under it in its bounds: an opaque square fill, no gradient. */
