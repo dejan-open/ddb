@@ -2,6 +2,7 @@ package dev.substrate.semantic
 
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNull
+import org.junit.Assert.assertTrue
 import org.junit.Test
 
 class ComposeVisualsTest {
@@ -129,6 +130,32 @@ class ComposeVisualsTest {
     fun size_packs_like_an_offset() {
         assertEquals(Pair(1080f, 2400f), ComposeVisuals.unpackOffset(ComposeVisuals.packSize(1080f, 2400f)))
         assertEquals(pack(12.5f, 3f), ComposeVisuals.packSize(12.5f, 3f))
+    }
+
+    @Test
+    fun int_size_unpacks_width_high_and_height_low() {
+        // A graphicsLayer block sees the coordinator's measured IntSize, not window bounds.
+        assertEquals(Pair(100, 48), ComposeVisuals.unpackIntSize((100L shl 32) or 48L))
+        assertEquals(Pair(1080, 2400), ComposeVisuals.unpackIntSize((1080L shl 32) or 2400L))
+    }
+
+    @Test
+    fun selectable_text_is_read_like_plain_text() {
+        // Text in a SelectionContainer has its own element class with the same fields.
+        assertTrue("SelectableTextAnnotatedStringElement" in ComposeVisuals.TEXT_ELEMENTS)
+        assertTrue("TextStringSimpleElement" in ComposeVisuals.TEXT_ELEMENTS)
+        assertTrue("TextAnnotatedStringElement" in ComposeVisuals.TEXT_ELEMENTS)
+    }
+
+    @Test
+    fun clipped_text_past_max_lines_is_truncated() {
+        // TextOverflow.Clip with maxLines: no ellipsis, but the line limit was hit.
+        assertEquals(true, ViewTreeWalker.textTruncated(ellipsized = false, exceededMaxLines = true))
+        assertEquals(true, ViewTreeWalker.textTruncated(ellipsized = true, exceededMaxLines = true))
+        assertEquals(true, ViewTreeWalker.textTruncated(ellipsized = true, exceededMaxLines = null))
+        assertEquals(false, ViewTreeWalker.textTruncated(ellipsized = false, exceededMaxLines = false))
+        assertEquals(false, ViewTreeWalker.textTruncated(ellipsized = null, exceededMaxLines = false))
+        assertNull(ViewTreeWalker.textTruncated(ellipsized = null, exceededMaxLines = null))
     }
 
     @Test

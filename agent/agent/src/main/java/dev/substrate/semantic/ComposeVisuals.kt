@@ -41,6 +41,14 @@ internal object ComposeVisuals {
         "BackgroundElement", "BorderModifierNodeElement", "PainterElement", "ShadowGraphicsLayerElement",
     )
 
+    /**
+     * Text modifiers whose style and color are read. Text in a SelectionContainer is a
+     * SelectableTextAnnotatedStringElement, with the same style and color fields.
+     */
+    val TEXT_ELEMENTS = setOf(
+        "TextStringSimpleElement", "TextAnnotatedStringElement", "SelectableTextAnnotatedStringElement",
+    )
+
     fun read(
         layoutNode: Any,
         density: Float,
@@ -177,7 +185,7 @@ internal object ComposeVisuals {
                             shape = field(element, "shape"),
                         )
                     } else {
-                        blockLayer(element, composeDensity, density, fontScale, ownBounds(info) ?: nodeBounds)
+                        blockLayer(element, composeDensity, density, fontScale, measuredSize(info, nodeBounds))
                     } ?: continue
                     val alpha = layer.alpha?.takeIf { it.isFinite() }?.coerceIn(0f, 1f)
                     if (alpha != null && alpha < 1f) ownAlpha *= alpha
@@ -208,7 +216,7 @@ internal object ComposeVisuals {
                         if (seenDraw) innerPad = add(innerPad, p) else outerPad = add(outerPad, p)
                     }
                 }
-                "TextStringSimpleElement", "TextAnnotatedStringElement" -> {
+                in TEXT_ELEMENTS -> {
                     val style = field(element, "style")
                     val producer = field(element, "color")
                     val color = textColorHex(producer, style, element, layerAlpha())
@@ -479,7 +487,7 @@ internal object ComposeVisuals {
      * fresh ReusableGraphicsLayerScope with the screen density (so `8.dp.toPx()` resolves as
      * it does on screen). Null when any of that is unavailable in this Compose release.
      */
-    private fun blockLayer(element: Any, composeDensity: Any?, density: Float, fontScale: Float, layerBounds: Bounds?): LayerProps? {
+    private fun blockLayer(element: Any, composeDensity: Any?, density: Float, fontScale: Float, layerSize: Pair<Int, Int>?): LayerProps? {
         val block = (field(element, "block") ?: field(element, "layerBlock")) as? Function1<*, *> ?: return null
         return try {
             val loader = element.javaClass.classLoader
@@ -496,11 +504,11 @@ internal object ComposeVisuals {
                     ?.invoke(scope, densityObj)
             }
             // Compose sets the layer's measured size before running the block; a block that
-            // reads `size` must see the same value here.
-            if (layerBounds != null) {
+            // reads `size` must see the same value here: untransformed and unclipped.
+            if (layerSize != null) {
                 scopeClass.methods
                     .firstOrNull { it.name.startsWith("setSize") && it.parameterCount == 1 }
-                    ?.invoke(scope, packSize(layerBounds.w.toFloat(), layerBounds.h.toFloat()))
+                    ?.invoke(scope, packSize(layerSize.first.toFloat(), layerSize.second.toFloat()))
             }
             @Suppress("UNCHECKED_CAST")
             (block as Function1<Any?, Any?>).invoke(scope)
@@ -603,6 +611,22 @@ internal object ComposeVisuals {
             else -> "loaded"
         }
     }
+
+    /**
+     * The measured size of the coordinator a modifier sits on (LayoutCoordinates.size): before
+     * a layer's scale or rotation and any ancestor clip, which window bounds include. It is the
+     * size Compose gives a `graphicsLayer { }` block. Falls back to the node's bounds when the
+     * coordinator can't be read.
+     */
+    private fun measuredSize(info: Any, nodeBounds: Bounds?): Pair<Int, Int>? {
+        val packed = invokePrefix(invoke0(info, "getCoordinates"), "getSize") as? Long
+        return packed?.let { unpackIntSize(it) }?.takeIf { it.first > 0 && it.second > 0 }
+            ?: nodeBounds?.let { Pair(it.w, it.h) }
+    }
+
+    /** Compose packs an IntSize as two ints: width in the high 32 bits, height in the low. */
+    fun unpackIntSize(packed: Long): Pair<Int, Int> =
+        Pair((packed ushr 32).toInt(), (packed and 0xFFFFFFFFL).toInt())
 
     /** The box a modifier draws in: the coordinator of the next layout modifier inward. */
     private fun ownBounds(info: Any): Bounds? = invoke0(info, "getCoordinates")?.let { boundsInWindow(it) }

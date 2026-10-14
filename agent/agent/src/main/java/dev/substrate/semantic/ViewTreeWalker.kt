@@ -594,6 +594,13 @@ object ViewTreeWalker {
         }
     }
 
+    /**
+     * Text is truncated when its last line is ellipsized or it ran past maxLines (a clip with
+     * no ellipsis). Null when neither signal could be read.
+     */
+    fun textTruncated(ellipsized: Boolean?, exceededMaxLines: Boolean?): Boolean? =
+        if (ellipsized == null && exceededMaxLines == null) null else ellipsized == true || exceededMaxLines == true
+
     /** (lineCount, truncated) from the node's GetTextLayoutResult semantics action. */
     private fun textLayout(config: Any?): Pair<Int?, Boolean?>? {
         if (config == null) return null
@@ -611,16 +618,21 @@ object ViewTreeWalker {
                 (fn as? Function1<Any?, Any?>)?.invoke(results)
                 val result = results.firstOrNull() ?: return null
                 val lines = (ComposeVisuals.invoke0(result, "getLineCount") as? Int)?.takeIf { it > 0 }
-                // Truncated = the last laid-out line ends in an ellipsis. The
-                // overflow flags are no signal: sub-pixel rounding sets
-                // didOverflowWidth (and a tall line height hasVisualOverflow)
-                // on text that is drawn whole.
+                // Truncated = the last laid-out line ends in an ellipsis, or the
+                // text had more lines than maxLines (TextOverflow.Clip cuts them
+                // with no ellipsis). The overflow flags are no signal: sub-pixel
+                // rounding sets didOverflowWidth (and a tall line height
+                // hasVisualOverflow) on text that is drawn whole.
                 val ellipsized = lines?.let { n ->
                     result.javaClass.methods
                         .firstOrNull { it.name == "isLineEllipsized" && it.parameterCount == 1 }
                         ?.invoke(result, n - 1) as? Boolean
                 }
-                return Pair(lines, ellipsized)
+                val exceededMaxLines = ComposeVisuals.invoke0(
+                    ComposeVisuals.invoke0(result, "getMultiParagraph"),
+                    "getDidExceedMaxLines",
+                ) as? Boolean
+                return Pair(lines, textTruncated(ellipsized, exceededMaxLines))
             }
         } catch (_: Throwable) {}
         return null
