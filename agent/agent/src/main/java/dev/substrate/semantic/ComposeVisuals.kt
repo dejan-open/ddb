@@ -59,7 +59,18 @@ internal object ComposeVisuals {
     private val DRAWING_ELEMENTS = setOf(
         "BackgroundElement", "BorderModifierNodeElement", "PainterElement", "ShadowGraphicsLayerElement",
         "DrawBehindElement", "DrawWithContentElement", "DrawWithCacheElement",
+        "ContentPainterElement", "SubcomposeContentPainterElement",
     )
+
+    /**
+     * Modifiers that draw a painter: Modifier.paint (Image) and Coil 3's AsyncImage, whose
+     * element is a ContentPainterElement that keeps its AsyncImagePainter on the live node
+     * (ContentPainterNode.painter), and SubcomposeAsyncImage's SubcomposeContentPainterElement,
+     * which keeps it on the element.
+     */
+    private val PAINTER_ELEMENTS = setOf("PainterElement", "ContentPainterElement", "SubcomposeContentPainterElement")
+
+    private const val ASYNC_IMAGE_PAINTER = "coil3.compose.AsyncImagePainter"
 
     /**
      * Modifiers that run an arbitrary draw lambda and have no fields to decode:
@@ -315,16 +326,82 @@ internal object ComposeVisuals {
     }
 
     /**
-     * The live drawWithCache nodes (CacheDrawModifierNodeImpl) of a LayoutNode, in chain order:
-     * its NodeChain from the head (the outermost modifier) through each node's child. Null when
-     * the chain can't be read.
+     * The live modifier nodes of a LayoutNode whose class is [simpleName], in chain order: its
+     * NodeChain from the head (the outermost modifier) through each node's child. Null when the
+     * chain can't be read. drawWithCache keeps its content block on its node
+     * (CacheDrawModifierNodeImpl), and Coil's AsyncImage its painter (ContentPainterNode).
      */
-    private fun cacheDrawNodes(layoutNode: Any): List<Any>? {
+    private fun chainNodes(layoutNode: Any, simpleName: String): List<Any>? {
         var node = field(field(layoutNode, "nodes"), "head") ?: return null
         val out = ArrayList<Any>()
         repeat(10_000) {
-            if (node.javaClass.simpleName == "CacheDrawModifierNodeImpl") out.add(node)
+            if (node.javaClass.simpleName == simpleName) out.add(node)
             node = field(node, "child") ?: return out
+        }
+        return null
+    }
+
+    /** What a painter puts on screen ([painterDraw]). */
+    sealed class PainterDraw {
+        /** It draws [painter]. */
+        class Draws(val painter: Any) : PainterDraw()
+
+        /** It draws nothing. */
+        object None : PainterDraw()
+
+        /** What it draws can't be read. */
+        object Unread : PainterDraw()
+    }
+
+    /**
+     * What [painter] draws: itself, or, for Coil's AsyncImagePainter, the painter it currently
+     * draws. AsyncImagePainter.onDraw draws its `painter` property (the current state's painter,
+     * after the request's transform) and nothing while that is null: State.Empty before a
+     * request starts, and Loading or Error with no placeholder or error painter. The property is
+     * a MutableState (`painter$delegate`); without it the current state's painter is read
+     * (`state.value.painter`), which it is set from.
+     */
+    fun painterDraw(painter: Any?): PainterDraw {
+        if (painter == null) return PainterDraw.Unread
+        if (painter.javaClass.name != ASYNC_IMAGE_PAINTER) return PainterDraw.Draws(painter)
+        val current = field(painter, "painter\$delegate")?.let { call0(it, "getValue") }
+            ?: call0(painter, "getState")?.value?.let { call0(it, "getValue") }?.value?.let { call0(it, "getPainter") }
+            ?: return PainterDraw.Unread
+        return current.value?.let { PainterDraw.Draws(it) } ?: PainterDraw.None
+    }
+
+    /** A value read by reflection, which may itself be null. */
+    class Read(val value: Any?)
+
+    /**
+     * Calls a no-argument method through a public class or interface that declares it, so a
+     * state or flow whose own class is not public (StateFlowImpl) can still be read. Null when
+     * there is no such method or the call throws.
+     */
+    fun call0(obj: Any, name: String): Read? {
+        val queue = ArrayDeque<Class<*>>().apply { add(obj.javaClass) }
+        val seen = HashSet<Class<*>>()
+        while (queue.isNotEmpty()) {
+            val type = queue.removeFirst()
+            if (!seen.add(type)) continue
+            val method = if (java.lang.reflect.Modifier.isPublic(type.modifiers)) {
+                try {
+                    type.getMethod(name).takeIf { java.lang.reflect.Modifier.isPublic(it.declaringClass.modifiers) }
+                } catch (_: Throwable) {
+                    null
+                }
+            } else {
+                null
+            }
+            if (method != null) {
+                return try {
+                    Read(method.invoke(obj))
+                } catch (_: Throwable) {
+                    null
+                }
+            }
+            type.superclass?.let { queue.add(it) }
+            queue.addAll(type.interfaces)
         }
         return null
     }
@@ -387,18 +464,29 @@ internal object ComposeVisuals {
         // A content block that skipped drawContent() hides every draw after it in the chain.
         var contentSkipped = false
         fun drawsHere(): Boolean = layerAlpha() > 0f && !contentSkipped
-        // drawWithCache keeps its content block on the live node, in chain order.
-        val cacheElements = infos.count { invoke0(it, "getModifier")?.javaClass?.simpleName == "DrawWithCacheElement" }
-        val cacheNodes by lazy { cacheDrawNodes(layoutNode) }
+        // drawWithCache keeps its content block on the live node, and Coil's AsyncImage its
+        // painter, in chain order.
+        val elementNames = infos.map { invoke0(it, "getModifier")?.javaClass?.simpleName }
+        val cacheElements = elementNames.count { it == "DrawWithCacheElement" }
+        val cacheNodes by lazy { chainNodes(layoutNode, "CacheDrawModifierNodeImpl") }
         var cacheIndex = 0
+        val painterElements = elementNames.count { it == "ContentPainterElement" }
+        val painterNodes by lazy { chainNodes(layoutNode, "ContentPainterNode") }
+        var painterIndex = 0
         for (info in infos) {
             if (info == null) continue
             val element = invoke0(info, "getModifier") ?: continue
             val name = element.javaClass.simpleName
+            // The k-th such element is the k-th such node, when the counts agree.
             val cacheNode = if (name == "DrawWithCacheElement") {
-                // The k-th drawWithCache element is the k-th cache node, when the counts agree.
                 val i = cacheIndex++
                 cacheNodes?.takeIf { it.size == cacheElements }?.get(i)
+            } else {
+                null
+            }
+            val painterNode = if (name == "ContentPainterElement") {
+                val i = painterIndex++
+                painterNodes?.takeIf { it.size == painterElements }?.get(i)
             } else {
                 null
             }
@@ -486,11 +574,19 @@ internal object ComposeVisuals {
                         )
                     }
                 }
-                "PainterElement" -> {
-                    // Image(alpha = 0f) / paint(alpha = 0f) draws nothing.
+                in PAINTER_ELEMENTS -> {
+                    // Image(alpha = 0f) / paint(alpha = 0f) / AsyncImage(alpha = 0f) draws nothing.
                     val painterAlpha = (field(element, "alpha") as? Float)?.takeIf { it.isFinite() } ?: 1f
                     if (painterAlpha <= 0f) continue
-                    val painter = field(element, "painter")
+                    val source = if (name == "ContentPainterElement") field(painterNode, "painter") else field(element, "painter")
+                    // Coil's painter is an image loaded at run time, like a View bitmap with no
+                    // resource, whatever painter it draws it with.
+                    val coil = name != "PainterElement" || source?.javaClass?.name == ASYNC_IMAGE_PAINTER
+                    val drawn = painterDraw(source)
+                    // An AsyncImagePainter with no current painter draws nothing: no image, and
+                    // no padding boundary.
+                    if (drawn is PainterDraw.None) continue
+                    val painter = (drawn as? PainterDraw.Draws)?.painter
                     if (painter?.javaClass?.simpleName == "ColorPainter") {
                         // ColorPainter fills its bounds with one color: that is a background, not
                         // an image, and a transparent one draws nothing (no padding boundary).
@@ -504,7 +600,7 @@ internal object ComposeVisuals {
                         continue
                     }
                     seenDraw = true
-                    val type = painterType(painter)
+                    val type = if (coil) "loaded" else painterType(painter)
                     if (type != null && v.imageType == null) {
                         v = v.copy(
                             imageType = type,
@@ -521,11 +617,16 @@ internal object ComposeVisuals {
                             argb(element, field(element, "spotColor") as? Long),
                         )
                     }
+                    // The layer's shape rounds the first draw only when the layer encloses it (no
+                    // draw came before it) and clips or shadows; a later layer shapes only what
+                    // follows it, and one that does neither shapes nothing.
+                    val shapes = !seenDraw && (elev != null || field(element, "clip") == true)
                     // A shadow is a draw: it sets the inside/outside boundary like a background.
                     if (elev != null) seenDraw = true
                     v = v.copy(
                         elevation = v.elevation ?: elev,
-                        cornerRadius = v.cornerRadius ?: cornerRadius(field(element, "shape"), density, measuredSize(info, nodeBounds)),
+                        cornerRadius = v.cornerRadius
+                            ?: if (shapes) cornerRadius(field(element, "shape"), density, measuredSize(info, nodeBounds)) else null,
                         drawBounds = if (elev != null) firstDrawBounds(info) else v.drawBounds,
                     )
                 }
@@ -553,12 +654,14 @@ internal object ComposeVisuals {
                     val shadow = layer.shadowPx
                         ?.takeIf { it.isFinite() && it > 0f && drawsHere() && layer.shadowColorsVisible }
                         ?.let { it / density }
+                    // As for a shadow element: only a layer that encloses the first draw shapes it.
+                    val shapes = !seenDraw && (layer.clip || shadow != null)
                     if (shadow != null) seenDraw = true
                     v = v.copy(
                         alpha = if (ownAlpha < 1f) ownAlpha else v.alpha,
                         elevation = v.elevation ?: shadow,
                         cornerRadius = v.cornerRadius
-                            ?: if (layer.clip || shadow != null) cornerRadius(layer.shape, density, measuredSize(info, nodeBounds)) else null,
+                            ?: if (shapes) cornerRadius(layer.shape, density, measuredSize(info, nodeBounds)) else null,
                         drawBounds = if (shadow != null) firstDrawBounds(info) else v.drawBounds,
                     )
                 }
@@ -1042,6 +1145,34 @@ internal object ComposeVisuals {
         }
     }
 
+    /**
+     * [v] with the font and text color a laid-out text draws with filled in where its modifier
+     * chain gave none. A text field (BasicTextField, and the Material fields built on it) draws
+     * its text through its own text-field modifiers, with no text element in the chain to read,
+     * but its semantics expose the layout (the GetTextLayoutResult action's TextLayoutResult),
+     * whose input carries the style the text was laid out and is drawn with (the field's
+     * textStyle, its color included) and the text itself, spans and all. [layoutResult] is that
+     * TextLayoutResult and [alpha] the alpha the node draws at. A font or color the chain gave
+     * is kept.
+     */
+    fun withLayoutText(
+        v: ComposeDrawInfo,
+        layoutResult: Any?,
+        composeDensity: Any?,
+        fontScale: Float,
+        resources: Resources?,
+        alpha: Float,
+    ): ComposeDrawInfo {
+        if (layoutResult == null || (v.font != null && v.textColor != null)) return v
+        val input = invoke0(layoutResult, "getLayoutInput") ?: return v
+        val style = invoke0(input, "getStyle") ?: return v
+        val spans = textSpans(invoke0(input, "getText"))
+        return v.copy(
+            font = v.font ?: font(style, spans, composeDensity, fontScale, resources),
+            textColor = v.textColor ?: textColorHex(null, style, spans, layoutResult, alpha),
+        )
+    }
+
     private class LayerProps(
         val alpha: Float?,
         val shadowPx: Float?,
@@ -1054,6 +1185,13 @@ internal object ComposeVisuals {
      * The layer properties a `graphicsLayer { … }` block sets, read by running the block on a
      * fresh ReusableGraphicsLayerScope with the screen density (so `8.dp.toPx()` resolves as
      * it does on screen). Null when any of that is unavailable in this Compose release.
+     *
+     * The block runs inside a read-only Compose snapshot, as content blocks do
+     * ([probeContentDraw], [runInReadOnlySnapshot]): it can read app state but not change it.
+     * A block that writes state throws there, and like one that throws for any other reason, or
+     * one that can't be run in a read-only snapshot at all, it is an unreadable layer: null,
+     * so the caller keeps the content under it and reports no alpha, shadow or shape for it.
+     * The scope it sets values on is the fresh one made here, never the node's own layer.
      */
     private fun blockLayer(element: Any, composeDensity: Any?, density: Float, fontScale: Float, layerSize: Pair<Int, Int>?): LayerProps? {
         val block = (field(element, "block") ?: field(element, "layerBlock")) as? Function1<*, *> ?: return null
@@ -1079,7 +1217,8 @@ internal object ComposeVisuals {
                     ?.invoke(scope, packSize(layerSize.first.toFloat(), layerSize.second.toFloat()))
             }
             @Suppress("UNCHECKED_CAST")
-            (block as Function1<Any?, Any?>).invoke(scope)
+            val fn = block as Function1<Any?, Any?>
+            if (!runInReadOnlySnapshot(loader) { fn.invoke(scope) }) return null
             LayerProps(
                 alpha = invokePrefix(scope, "getAlpha") as? Float,
                 shadowPx = invokePrefix(scope, "getShadowElevation") as? Float,

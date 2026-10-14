@@ -311,7 +311,7 @@ object ViewTreeWalker {
 
             is ImageView -> {
                 content = view.contentDescription?.toString()
-                textColor = view.imageTintList?.defaultColor?.let { colorToHex(it) }
+                textColor = imageTint(view)
                 val imgInfo = extractImageInfo(view, resourceId ?: "image_${bounds.x}_${bounds.y}")
                 imageResource = imgInfo?.first
                 imageType = imgInfo?.second
@@ -542,7 +542,7 @@ object ViewTreeWalker {
         val isImage = image.isImage
 
         val says = content != null || ownClick || isInput || role != null || (isClickable && text != null)
-        val elementBounds = if (says) bounds else visuals.drawBounds ?: bounds
+        val (elementBounds, margin) = composeBox(says, bounds, visuals.drawBounds, visuals.margin)
         if (elementBounds != null && (says || visuals.draws)) {
             val type = when {
                 isInput -> "input"
@@ -554,19 +554,30 @@ object ViewTreeWalker {
             }
             val id = if (!content.isNullOrEmpty()) slugify(content)
                 else "compose_${type}_${elementBounds.x}_${elementBounds.y}"
-            val layout = if (text != null) textLayout(config) else null
+            val showsText = text != null || isInput
+            val layoutResult = if (showsText) textLayoutResult(config) else null
+            val layout = if (text != null) layoutResult?.let { textLayout(it) } else null
+            // A text field draws its text through its own modifiers, not a text element, so its
+            // font and color come from the layout its semantics expose.
+            val textVisuals = if (showsText) {
+                ComposeVisuals.withLayoutText(
+                    visuals, layoutResult, ComposeVisuals.invoke0(node, "getDensity"), fontScale, resources, subtreeAlpha,
+                )
+            } else {
+                visuals
+            }
             val z = nextZ()
             out.add(
                 SemanticElement(
                     id = id, platformId = null, type = type, content = content,
-                    font = if (text != null) visuals.font else null,
-                    color = if (text != null) visuals.textColor else visuals.imageTint,
+                    font = if (showsText) textVisuals.font else null,
+                    color = if (showsText) textVisuals.textColor else visuals.imageTint,
                     bounds = elementBounds, zIndex = z,
                     clickable = isClickable, enabled = !isDisabled, accessible = config != null,
                     a11yLabel = contentDesc, a11yId = null,
                     background = visuals.background,
                     cornerRadius = visuals.cornerRadius,
-                    padding = visuals.padding, margin = visuals.margin,
+                    padding = visuals.padding, margin = margin,
                     elevation = visuals.elevation, render = null,
                     lineCount = layout?.first, truncated = layout?.second,
                     imageResource = if (isImage) id else null,
@@ -603,8 +614,23 @@ object ViewTreeWalker {
     fun textTruncated(ellipsized: Boolean?, exceededMaxLines: Boolean?): Boolean? =
         if (ellipsized == null && exceededMaxLines == null) null else ellipsized == true || exceededMaxLines == true
 
-    /** (lineCount, truncated) from the node's GetTextLayoutResult semantics action. */
-    private fun textLayout(config: Any?): Pair<Int?, Boolean?>? {
+    /**
+     * The bounds and margin a Compose element reports. Its margin is the padding outside its
+     * first draw, so it goes with that draw's bounds, which sit inside it ([drawBounds]); a node
+     * that only says something (text, a click, a role, an input) and has no margin is reported
+     * over its whole box. When a margin's draw bounds can't be read the whole box is reported
+     * with no margin, so no stretch of screen is counted both as the element and as its margin.
+     */
+    internal fun composeBox(says: Boolean, bounds: Bounds?, drawBounds: Bounds?, margin: MarginInfo?): Pair<Bounds?, MarginInfo?> =
+        when {
+            margin != null && drawBounds != null -> Pair(drawBounds, margin)
+            margin != null -> Pair(bounds, null)
+            says -> Pair(bounds, null)
+            else -> Pair(drawBounds ?: bounds, null)
+        }
+
+    /** The TextLayoutResult the node's GetTextLayoutResult semantics action returns, or null. */
+    private fun textLayoutResult(config: Any?): Any? {
         if (config == null) return null
         try {
             val iter = (config as? Iterable<*>)?.iterator() ?: return null
@@ -618,27 +644,34 @@ object ViewTreeWalker {
                 val results = ArrayList<Any?>()
                 @Suppress("UNCHECKED_CAST")
                 (fn as? Function1<Any?, Any?>)?.invoke(results)
-                val result = results.firstOrNull() ?: return null
-                val lines = (ComposeVisuals.invoke0(result, "getLineCount") as? Int)?.takeIf { it > 0 }
-                // Truncated = the last laid-out line ends in an ellipsis, or the
-                // text had more lines than maxLines (TextOverflow.Clip cuts them
-                // with no ellipsis). The overflow flags are no signal: sub-pixel
-                // rounding sets didOverflowWidth (and a tall line height
-                // hasVisualOverflow) on text that is drawn whole.
-                val ellipsized = lines?.let { n ->
-                    result.javaClass.methods
-                        .firstOrNull { it.name == "isLineEllipsized" && it.parameterCount == 1 }
-                        ?.invoke(result, n - 1) as? Boolean
-                }
-                val exceededMaxLines = ComposeVisuals.invoke0(
-                    ComposeVisuals.invoke0(result, "getMultiParagraph"),
-                    "getDidExceedMaxLines",
-                ) as? Boolean
-                return Pair(lines, textTruncated(ellipsized, exceededMaxLines))
+                return results.firstOrNull()
             }
         } catch (_: Throwable) {}
         return null
     }
+
+    /** (lineCount, truncated) from a TextLayoutResult. */
+    private fun textLayout(result: Any): Pair<Int?, Boolean?>? =
+        try {
+            val lines = (ComposeVisuals.invoke0(result, "getLineCount") as? Int)?.takeIf { it > 0 }
+            // Truncated = the last laid-out line ends in an ellipsis, or the
+            // text had more lines than maxLines (TextOverflow.Clip cuts them
+            // with no ellipsis). The overflow flags are no signal: sub-pixel
+            // rounding sets didOverflowWidth (and a tall line height
+            // hasVisualOverflow) on text that is drawn whole.
+            val ellipsized = lines?.let { n ->
+                result.javaClass.methods
+                    .firstOrNull { it.name == "isLineEllipsized" && it.parameterCount == 1 }
+                    ?.invoke(result, n - 1) as? Boolean
+            }
+            val exceededMaxLines = ComposeVisuals.invoke0(
+                ComposeVisuals.invoke0(result, "getMultiParagraph"),
+                "getDidExceedMaxLines",
+            ) as? Boolean
+            Pair(lines, textTruncated(ellipsized, exceededMaxLines))
+        } catch (_: Throwable) {
+            null
+        }
 
     private fun findAndroidComposeView(view: View): View? {
         if (view.javaClass.name == "androidx.compose.ui.platform.AndroidComposeView") return view
@@ -1146,13 +1179,7 @@ object ViewTreeWalker {
             }
 
             is GradientDrawable -> {
-                try {
-                    val field = GradientDrawable::class.java.getDeclaredField("mSolidColors")
-                    field.isAccessible = true
-                    (field.get(drawable) as? android.content.res.ColorStateList)?.defaultColor?.let { colorToHex(it) }
-                } catch (_: Exception) {
-                    null
-                }
+                gradientFill(drawable)
             }
 
             is RippleDrawable -> {
@@ -1232,41 +1259,97 @@ object ViewTreeWalker {
         return Triple(name, imgType, "images/$fileName")
     }
 
-    private fun extractCornerRadius(view: View): Float? {
-        val bg = view.background
-        if (bg is GradientDrawable) {
-            return try {
-                val field = GradientDrawable::class.java.getDeclaredField("mRadius")
-                field.isAccessible = true
-                field.getFloat(bg).takeIf { it > 0f }
-            } catch (_: Exception) {
-                null
-            }
-        }
-        return null
-    }
+    private fun extractCornerRadius(view: View): Float? = (view.background as? GradientDrawable)?.let { gradientCornerRadius(it) }
 
     private fun extractBorder(
         view: View,
         density: Float,
-    ): BorderInfo? {
-        val bg = view.background
-        if (bg is GradientDrawable) {
-            return try {
-                val widthField = GradientDrawable::class.java.getDeclaredField("mStrokeWidth")
-                widthField.isAccessible = true
-                val strokeWidth = widthField.getInt(bg)
-                if (strokeWidth <= 0) return null
-                val colorField = GradientDrawable::class.java.getDeclaredField("mStrokeColors")
-                colorField.isAccessible = true
-                val strokeColor = (colorField.get(bg) as? android.content.res.ColorStateList)?.defaultColor
-                strokeBorder(strokeWidth, strokeColor, density)
-            } catch (_: Exception) {
-                null
-            }
+    ): BorderInfo? = (view.background as? GradientDrawable)?.let { gradientBorder(it, density) }
+
+    // ---- GradientDrawable ----
+    //
+    // A GradientDrawable keeps what it draws on its GradientState (the drawable's ConstantState,
+    // `drawable.constantState`), not on itself: the solid and stroke color lists, the stroke
+    // width and the corner radii are GradientState fields (AOSP GradientDrawable.java), so a
+    // field lookup on GradientDrawable finds none of them. The public getters (API 24) read the
+    // state for us. On a device the state's own fields are hidden API: mSolidColors and mRadius
+    // are @UnsupportedAppUsage(maxTargetSdk = P), blocked for an app that targets a later SDK,
+    // and mStrokeColors and mStrokeWidth carry no annotation, so they are blocked everywhere.
+    // The stroke is read from what draws it instead, the drawable's mStrokePaint, which is
+    // @UnsupportedAppUsage with no maxTargetSdk and so readable at any target SDK.
+
+    /**
+     * A color list resolved the way a drawable resolves it at [state]: GradientDrawable fills and
+     * strokes with `getColorForState(getState(), 0)` (setColor, setStroke, onStateChange), and a
+     * tint is `getColorForState(getState(), Color.TRANSPARENT)` (Drawable.updateTintFilter).
+     * [fallback] is the color for a state the list has no entry for. Null with no list.
+     */
+    internal fun stateColor(list: android.content.res.ColorStateList?, state: IntArray?, fallback: Int = 0): Int? =
+        list?.getColorForState(state, fallback)
+
+    /**
+     * The solid color a GradientDrawable fills with: its color list (getColor()) at the
+     * drawable's current state. Null when it has none: a gradient fill, or no fill.
+     */
+    internal fun gradientFill(drawable: GradientDrawable): String? =
+        stateColor(drawable.color, drawable.state)?.let { colorToHex(it) }
+
+    /**
+     * A GradientDrawable's top-left corner radius in px: the first of its per-corner radii
+     * (getCornerRadii(), top-left x first) when it has them, else its one radius
+     * (getCornerRadius()). Null when that corner isn't rounded.
+     */
+    internal fun gradientCornerRadius(drawable: GradientDrawable): Float? =
+        (drawable.cornerRadii?.firstOrNull() ?: drawable.cornerRadius).takeIf { it.isFinite() && it > 0f }
+
+    /**
+     * The stroke a GradientDrawable draws, as a border: what its stroke paint holds
+     * ([paintStroke]), or, when that paint can't be read, what its GradientState holds
+     * ([stateStroke]). Null when it draws no stroke.
+     */
+    internal fun gradientBorder(drawable: GradientDrawable, density: Float): BorderInfo? {
+        val paint = try {
+            GradientDrawable::class.java.getDeclaredField("mStrokePaint").apply { isAccessible = true }.get(drawable)
+        } catch (_: Throwable) {
+            return stateStroke(drawable.constantState, drawable.state, density)
         }
-        return null
+        // No stroke paint: setStroke was never called, and nothing is stroked.
+        return (paint as? android.graphics.Paint)?.let { paintStroke(it, density) }
     }
+
+    /**
+     * A GradientDrawable's stroke paint as a border. GradientDrawable sets that paint's width to
+     * the stroke width and its color to the stroke's color list resolved at the drawable's
+     * current state (setStroke, then onStateChange on every state change), and strokes with it
+     * only when its width is above 0 (draw: `haveStroke = ... mStrokePaint.getStrokeWidth() > 0`).
+     */
+    internal fun paintStroke(paint: android.graphics.Paint, density: Float): BorderInfo? =
+        strokeBorder(paint.strokeWidth, paint.color, density)
+
+    /**
+     * A stroke read from a GradientDrawable's GradientState ([state], the drawable's
+     * ConstantState): mStrokeWidth (-1 for none) and mStrokeColors resolved at the drawable's
+     * [drawableState], as GradientDrawable resolves them. Null when either can't be read.
+     */
+    internal fun stateStroke(state: Any?, drawableState: IntArray?, density: Float): BorderInfo? {
+        if (state == null) return null
+        fun read(name: String): Any? = try {
+            state.javaClass.getDeclaredField(name).apply { isAccessible = true }.get(state)
+        } catch (_: Throwable) {
+            null
+        }
+        val width = read("mStrokeWidth") as? Int ?: return null
+        val colors = read("mStrokeColors") as? android.content.res.ColorStateList
+        return strokeBorder(width.toFloat(), stateColor(colors, drawableState), density)
+    }
+
+    /**
+     * An ImageView's tint, resolved as its drawable resolves it at the view's current state
+     * (Drawable.updateTintFilter: `getColorForState(getState(), Color.TRANSPARENT)`; ImageView
+     * keeps a stateful drawable's state in step with its own). Null with no tint.
+     */
+    internal fun imageTint(view: ImageView): String? =
+        stateColor(view.imageTintList, view.drawableState, android.graphics.Color.TRANSPARENT)?.let { colorToHex(it) }
 
     /**
      * A GradientDrawable stroke as a border, or null when it draws nothing: no width, or a stroke
@@ -1275,8 +1358,8 @@ object ViewTreeWalker {
      * strokes Color.TRANSPARENT, so a missing color is a transparent one. The alpha check is the
      * one Compose borders go through ([ComposeVisuals.argbHex]); the hex is the same as colorToHex's.
      */
-    internal fun strokeBorder(strokeWidthPx: Int, strokeColor: Int?, density: Float): BorderInfo? {
-        if (strokeWidthPx <= 0 || strokeColor == null) return null
+    internal fun strokeBorder(strokeWidthPx: Float, strokeColor: Int?, density: Float): BorderInfo? {
+        if (!strokeWidthPx.isFinite() || strokeWidthPx <= 0f || strokeColor == null) return null
         val color = ComposeVisuals.argbHex(strokeColor, keepTransparent = false) ?: return null
         return BorderInfo(width = strokeWidthPx / density, color = color)
     }

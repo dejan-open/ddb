@@ -89,18 +89,37 @@ class DrawnElementTest {
         // GradientDrawable strokes only when the stroke paint's alpha is above 0, so a transparent
         // stroke color is no border at any width: none is serialized, and it doesn't count toward
         // drawsSomething.
-        assertEquals(null, ViewTreeWalker.strokeBorder(6, 0x00FF0000, density = 2f))
-        assertEquals(null, ViewTreeWalker.strokeBorder(6, 0, density = 2f))
+        assertEquals(null, ViewTreeWalker.strokeBorder(6f, 0x00FF0000, density = 2f))
+        assertEquals(null, ViewTreeWalker.strokeBorder(6f, 0, density = 2f))
         // setStroke with no color list strokes Color.TRANSPARENT.
-        assertEquals(null, ViewTreeWalker.strokeBorder(6, null, density = 2f))
+        assertEquals(null, ViewTreeWalker.strokeBorder(6f, null, density = 2f))
         // No width, no border.
-        assertEquals(null, ViewTreeWalker.strokeBorder(0, 0xFF000000.toInt(), density = 2f))
+        assertEquals(null, ViewTreeWalker.strokeBorder(0f, 0xFF000000.toInt(), density = 2f))
         // A visible stroke, however faint, is a border, its width in dp.
-        assertEquals(BorderInfo(3f, "#FF0000"), ViewTreeWalker.strokeBorder(6, 0xFFFF0000.toInt(), density = 2f))
-        assertEquals(BorderInfo(1f, "#01000000"), ViewTreeWalker.strokeBorder(2, 0x01000000, density = 2f))
+        assertEquals(BorderInfo(3f, "#FF0000"), ViewTreeWalker.strokeBorder(6f, 0xFFFF0000.toInt(), density = 2f))
+        assertEquals(BorderInfo(1f, "#01000000"), ViewTreeWalker.strokeBorder(2f, 0x01000000, density = 2f))
         // A clickable wrapper whose only draw is a transparent stroke is still a ghost.
-        val transparentStroke = ViewTreeWalker.strokeBorder(6, 0x00FF0000, density = 2f)
+        val transparentStroke = ViewTreeWalker.strokeBorder(6f, 0x00FF0000, density = 2f)
         assertEquals(listOf("label"), survivors(element("p", parent, type = "button", clickable = true, border = transparentStroke)))
+    }
+
+    @Test
+    fun a_compose_margin_goes_with_the_bounds_inside_it() {
+        val node = Bounds(0, 0, 100, 60)
+        val drawn = Bounds(16, 16, 68, 28)
+        val margin = MarginInfo(8, 8, 8, 8)
+        // padding(8).background(…) on a node that says something (text, a click, a role): the
+        // background's box, with the 8 dp outside it as the margin, not the whole node and the
+        // margin on top of it.
+        assertEquals(Pair(drawn, margin), ViewTreeWalker.composeBox(says = true, bounds = node, drawBounds = drawn, margin = margin))
+        // The same for a node that only draws.
+        assertEquals(Pair(drawn, margin), ViewTreeWalker.composeBox(says = false, bounds = node, drawBounds = drawn, margin = margin))
+        // Draw bounds that can't be read: the whole node, and no margin counted on top of it.
+        assertEquals(Pair(node, null), ViewTreeWalker.composeBox(says = true, bounds = node, drawBounds = null, margin = margin))
+        // No margin: a node that says something keeps its whole box, one that only draws its draw's.
+        assertEquals(Pair(node, null), ViewTreeWalker.composeBox(says = true, bounds = node, drawBounds = drawn, margin = null))
+        assertEquals(Pair(drawn, null), ViewTreeWalker.composeBox(says = false, bounds = node, drawBounds = drawn, margin = null))
+        assertEquals(Pair(node, null), ViewTreeWalker.composeBox(says = false, bounds = node, drawBounds = null, margin = null))
     }
 
     @Test

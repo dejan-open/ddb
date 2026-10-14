@@ -1,8 +1,16 @@
 package dev.substrate.semantic
 
+import androidx.compose.runtime.snapshots.FakeState
+import androidx.compose.runtime.snapshots.Snapshot
+import androidx.compose.ui.graphics.ReusableGraphicsLayerScope
 import androidx.compose.ui.graphics.drawscope.ContentDrawScope
+import coil3.compose.AsyncImagePainter
+import coil3.compose.FakeImageState
+import coil3.compose.FakeMutableState
+import coil3.compose.FakeStateFlow
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
+import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
@@ -16,7 +24,7 @@ class ComposeDrawChainTest {
     class DrawBehindElement
     class DrawWithContentElement(private val onDraw: (ContentDrawScope.() -> Unit)? = null)
     class DrawWithCacheElement
-    class GraphicsLayerElement(private val alpha: Float)
+    class GraphicsLayerElement(private val alpha: Float, private val clip: Boolean = false, private val shape: Any? = null)
     class PaddingElement(
         private val start: Float,
         private val top: Float,
@@ -45,7 +53,7 @@ class ComposeDrawChainTest {
     }
     class AbsoluteRoundedCornerShape(private val topStart: Any, private val bottomStart: Any)
     class CutCornerShape(private val topStart: Any, private val bottomStart: Any)
-    class ShadowGraphicsLayerElement(private val elevation: Float, private val shape: Any)
+    class ShadowGraphicsLayerElement(private val elevation: Float, private val shape: Any, private val clip: Boolean = false)
     class ShaderBrush
     class BorderModifierNodeElement(private val width: Float, private val brush: Any, private val shape: Any)
 
@@ -384,5 +392,154 @@ class ComposeDrawChainTest {
             Range(SpanStyle(weight = FontWeight(700)), 2, 5),
         )
         assertEquals(FontInfo("sans-serif", "bold", 14f), read(TextAnnotatedStringElement(allBold, base)).font)
+    }
+
+    // A background with Compose's fields: a solid color (no brush) and a shape.
+    class BackgroundElement(private val color: Long, private val shape: Any)
+
+    @Test
+    fun a_clip_or_shadow_layer_after_the_first_draw_does_not_round_it() {
+        val rounded = RoundedCornerShape(DpCornerSize(8f))
+        val square = Any()
+        // background(Red).clip(RoundedCornerShape(8.dp)): the background is drawn square, and
+        // the clip shapes only what comes after it.
+        assertNull(read(BackgroundElement(red, square), GraphicsLayerElement(1f, clip = true, shape = rounded)).cornerRadius)
+        // background(Red).shadow(4.dp, RoundedCornerShape(8.dp)): the same; the shadow is still drawn.
+        val shadowAfter = read(BackgroundElement(red, square), ShadowGraphicsLayerElement(4f, rounded))
+        assertNull(shadowAfter.cornerRadius)
+        assertEquals(4f, shadowAfter.elevation!!, 0f)
+        // A clip or shadow before the first draw encloses it, and rounds it.
+        assertEquals(8f, read(GraphicsLayerElement(1f, clip = true, shape = rounded), BackgroundElement(red, square)).cornerRadius!!, 0f)
+        assertEquals(8f, read(ShadowGraphicsLayerElement(4f, rounded), BackgroundElement(red, square)).cornerRadius!!, 0f)
+        assertEquals(8f, read(ShadowGraphicsLayerElement(0f, rounded, clip = true), BackgroundElement(red, square)).cornerRadius!!, 0f)
+        // A layer that neither clips nor draws a shadow (shadow(0.dp, shape), clip = false) shapes nothing.
+        assertNull(read(ShadowGraphicsLayerElement(0f, rounded), BackgroundElement(red, square)).cornerRadius)
+        assertNull(read(GraphicsLayerElement(1f, shape = rounded), BackgroundElement(red, square)).cornerRadius)
+    }
+
+    // graphicsLayer { … }: the block, run on the scope in FakeGraphicsLayerScope.kt. The node
+    // carries a Compose Density, which the layer scope is given before the block runs.
+    class BlockGraphicsLayerElement(private val block: (ReusableGraphicsLayerScope) -> Unit)
+    class DensityNode(private vararg val elements: Any) {
+        fun getModifierInfo(): List<Any> = elements.map { Info(it) }
+        fun getDensity(): Any = Any()
+    }
+
+    private fun readLayered(vararg elements: Any): ComposeDrawInfo =
+        ComposeVisuals.read(DensityNode(*elements), density = 1f, fontScale = 1f, resources = null, nodeBounds = null)
+
+    @Test
+    fun a_graphicsLayer_block_runs_in_a_read_only_snapshot() {
+        // It runs inside a snapshot, which is disposed afterwards, and what it sets is read.
+        var inside: Snapshot? = null
+        val faded = readLayered(BlockGraphicsLayerElement { inside = Snapshot.current; it.alpha = 0f }, BackgroundElement(red, Any()))
+        assertNotNull(inside)
+        assertTrue(inside!!.disposed)
+        assertNull(Snapshot.current)
+        assertNull(faded.background)
+        assertEquals(0f, faded.alpha!!, 0f)
+        // A block that writes app state is refused there: the write never lands, and the layer
+        // is unreadable, so the content under it is kept and no alpha is reported for it.
+        val counter = FakeState(0)
+        val writes = readLayered(
+            BlockGraphicsLayerElement { counter.value = counter.value + 1; it.alpha = 0f },
+            BackgroundElement(red, Any()),
+        )
+        assertEquals(0, counter.value)
+        assertEquals("#FF0000", writes.background)
+        assertNull(writes.alpha)
+        // A block that throws for any other reason is unreadable the same way.
+        val throws = readLayered(BlockGraphicsLayerElement { it.alpha = 0f; error("boom") }, BackgroundElement(red, Any()))
+        assertEquals("#FF0000", throws.background)
+        assertNull(throws.alpha)
+    }
+
+    // Painters: Modifier.paint / Image, and Coil 3's AsyncImage elements, with their fields.
+    class BitmapPainter
+    class ColorPainter(private val color: Long)
+    class PainterElement(private val painter: Any?)
+    class ContentPainterElement
+    class SubcomposeContentPainterElement(private val painter: Any?)
+    class ContentPainterNode(private val painter: Any?) : ChainNode()
+
+    private fun asyncPainter(current: Any?) = AsyncImagePainter(FakeMutableState(current))
+
+    private fun asyncImage(painter: AsyncImagePainter?, vararg around: Any): ComposeDrawInfo {
+        val nodes = if (painter == null) chain() else chain(ContentPainterNode(painter))
+        return readChained(nodes, *around, ContentPainterElement())
+    }
+
+    @Test
+    fun a_coil_async_image_is_an_image() {
+        // AsyncImage(model = url): a ContentPainterElement, whose painter is on its live node.
+        val loaded = asyncImage(asyncPainter(BitmapPainter()))
+        assertEquals("loaded", loaded.imageType)
+        assertTrue(loaded.draws)
+        // SubcomposeAsyncImage keeps the painter on the element.
+        assertEquals("loaded", read(SubcomposeContentPainterElement(asyncPainter(BitmapPainter()))).imageType)
+        // A node that can't be found is still an image, as before its painter could be read.
+        assertEquals("loaded", asyncImage(null).imageType)
+        // It sets the padding boundary like any image.
+        val padded = asyncImage(asyncPainter(BitmapPainter()), pad(8f))
+        assertEquals(MarginInfo(8, 8, 8, 8), padded.margin)
+    }
+
+    @Test
+    fun a_coil_painter_with_nothing_to_draw_is_no_image() {
+        // State.Empty, or Loading with no placeholder: AsyncImagePainter draws nothing.
+        val empty = asyncImage(asyncPainter(null))
+        assertNull(empty.imageType)
+        assertFalse(empty.draws)
+        // No draw, so no padding boundary: all of it is the node's own.
+        val padded = asyncImage(asyncPainter(null), pad(8f))
+        assertNull(padded.margin)
+        assertEquals(PaddingInfo(8, 8, 8, 8), padded.padding)
+        // The same through Image(painter = rememberAsyncImagePainter(url)) and SubcomposeAsyncImage.
+        assertNull(read(PainterElement(asyncPainter(null))).imageType)
+        assertNull(read(SubcomposeContentPainterElement(asyncPainter(null))).imageType)
+        // Without the painter property, the current state's painter is read instead.
+        val fromState = { painter: Any? -> AsyncImagePainter(null, FakeStateFlow(FakeImageState(painter))) }
+        assertNull(read(PainterElement(fromState(null))).imageType)
+        assertEquals("loaded", read(PainterElement(fromState(BitmapPainter()))).imageType)
+        // A painter whose current painter can't be read at all is still an image.
+        assertEquals("loaded", read(PainterElement(AsyncImagePainter(null))).imageType)
+    }
+
+    @Test
+    fun a_coil_color_placeholder_is_a_background() {
+        // placeholder = ColorPainter(Gray) while loading: a fill, not an image.
+        val v = asyncImage(asyncPainter(ColorPainter(red)))
+        assertEquals("#FF0000", v.background)
+        assertNull(v.imageType)
+        // Other painters keep their own types.
+        assertEquals("raster", read(PainterElement(BitmapPainter())).imageType)
+    }
+
+    // A text field's layout: its TextLayoutResult and the input it was laid out from.
+    class TextLayoutInput(private val text: Any, private val style: Any) {
+        fun getText(): Any = text
+        fun getStyle(): Any = style
+    }
+    class TextLayoutResult(private val input: Any) {
+        fun getLayoutInput(): Any = input
+    }
+
+    @Test
+    fun a_text_field_reports_the_font_and_color_of_its_layout() {
+        // BasicTextField(textStyle = TextStyle(color = Red)): no text element in the chain, but
+        // its semantics expose the layout, with the style the text is drawn in.
+        val layout = TextLayoutResult(TextLayoutInput(AnnotatedString("Hello"), ColorTextStyle(red)))
+        val field = ComposeVisuals.withLayoutText(ComposeDrawInfo(), layout, null, 1f, null, alpha = 1f)
+        assertEquals(FontInfo("sans-serif", "regular", 14f), field.font)
+        assertEquals("#FF0000", field.textColor)
+        // The node's alpha applies to the color, as it does to a text element's.
+        assertEquals("#80FF0000", ComposeVisuals.withLayoutText(ComposeDrawInfo(), layout, null, 1f, null, alpha = 0.5f).textColor)
+        // A full-range color span in the field's text draws over the style.
+        val spanned = TextLayoutResult(TextLayoutInput(AnnotatedString("Hello", Range(ColorSpanStyle(blue), 0, 5)), ColorTextStyle(red)))
+        assertEquals("#0000FF", ComposeVisuals.withLayoutText(ComposeDrawInfo(), spanned, null, 1f, null, alpha = 1f).textColor)
+        // What the modifier chain gave is kept, and with no layout nothing changes.
+        val chain = ComposeDrawInfo(font = FontInfo("serif", "bold", 20f), textColor = "#00FF00")
+        assertEquals(chain, ComposeVisuals.withLayoutText(chain, layout, null, 1f, null, alpha = 1f))
+        assertEquals(ComposeDrawInfo(), ComposeVisuals.withLayoutText(ComposeDrawInfo(), null, null, 1f, null, alpha = 1f))
     }
 }

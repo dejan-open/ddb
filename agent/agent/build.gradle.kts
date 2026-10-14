@@ -20,6 +20,22 @@ android {
     kotlinOptions {
         jvmTarget = "17"
     }
+
+    testOptions {
+        unitTests {
+            // The View-path tests run real framework drawables (GradientDrawable, ImageView
+            // tints) under Robolectric.
+            isIncludeAndroidResources = true
+            all { test ->
+                // Robolectric on Android 16 reaches into java.io and jdk.internal.access, which
+                // java.base seals.
+                test.jvmArgs(
+                    "--add-opens=java.base/java.io=ALL-UNNAMED",
+                    "--add-exports=java.base/jdk.internal.access=ALL-UNNAMED"
+                )
+            }
+        }
+    }
 }
 
 dependencies {
@@ -29,6 +45,7 @@ dependencies {
     compileOnly("com.squareup.retrofit2:retrofit:2.11.0")
     compileOnly("androidx.recyclerview:recyclerview:1.3.2")
     testImplementation("junit:junit:4.13.2")
+    testImplementation("org.robolectric:robolectric:4.17")
 }
 
 afterEvaluate {
