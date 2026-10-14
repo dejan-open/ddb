@@ -39,11 +39,12 @@ internal data class ComposeDrawInfo(
      */
     val contentSkipped: Boolean = false,
     /**
-     * The node's click (clickable, combinedClickable, toggleable, selectable) comes before any
-     * outer padding in the chain (clickable { }.padding(8.dp)), so it covers the whole box,
-     * margin included.
+     * The box the node's click (clickable, combinedClickable, toggleable, selectable) covers:
+     * the node's box inset by every padding before the click in the chain, so
+     * padding(4.dp).clickable { }.padding(8.dp) leaves out the outer 4 dp only. The whole box
+     * when the click comes first; null when no click modifier was read.
      */
-    val clickOutsideMargin: Boolean = false,
+    val clickBounds: Bounds? = null,
 ) {
     val draws: Boolean
         // A shadow is drawn on its own, with no background or content under it.
@@ -465,8 +466,9 @@ internal object ComposeVisuals {
         var outerPad: FloatArray? = null
         var innerPad: FloatArray? = null
         var seenDraw = false
-        // A click seen before any outer padding covers the whole box, margin included.
-        var clickOutsideMargin = false
+        // The padding before the first click in the chain (top, bottom, start, end in dp): the
+        // click covers the box inside it. Null until a click is seen.
+        var clickInset: FloatArray? = null
         // The first drawing modifier owns the draw bounds, even when they equal the node's
         // (recorded as null): a later modifier inside padding must not replace them.
         var drawBoundsTaken = false
@@ -534,7 +536,7 @@ internal object ComposeVisuals {
                 continue
             }
             when (name) {
-                in CLICK_ELEMENTS -> if (outerPad == null) clickOutsideMargin = true
+                in CLICK_ELEMENTS -> if (clickInset == null) clickInset = add(outerPad, innerPad ?: FloatArray(4))
                 "BackgroundElement" -> {
                     // background(brush, alpha) scales the brush only; the color overload has none.
                     val brushAlpha = (field(element, "alpha") as? Float)?.takeIf { it.isFinite() } ?: 1f
@@ -729,12 +731,22 @@ internal object ComposeVisuals {
             innerPad = outerPad
             outerPad = null
         }
+        // The click's box in window pixels; a logical start is the right side in an RTL layout.
+        val clickBounds = clickInset?.let { inset ->
+            nodeBounds?.let { b ->
+                val rtl = (invoke0(layoutNode, "getLayoutDirection") as? Enum<*>)?.name == "Rtl"
+                fun px(dp: Float): Int = Math.round(dp * density)
+                val left = px(if (rtl) inset[3] else inset[2])
+                val right = px(if (rtl) inset[2] else inset[3])
+                Bounds(b.x + left, b.y + px(inset[0]), b.w - left - right, b.h - px(inset[0]) - px(inset[1]))
+            }
+        }
         return v.copy(
             padding = innerPad?.let { PaddingInfo(it[0].toInt(), it[1].toInt(), it[2].toInt(), it[3].toInt()) }
                 ?.takeIf { it.top > 0 || it.bottom > 0 || it.start > 0 || it.end > 0 },
             margin = outerPad?.let { MarginInfo(it[0].toInt(), it[1].toInt(), it[2].toInt(), it[3].toInt()) }
                 ?.takeIf { it.top > 0 || it.bottom > 0 || it.start > 0 || it.end > 0 },
-            clickOutsideMargin = clickOutsideMargin,
+            clickBounds = clickBounds,
         )
     }
 

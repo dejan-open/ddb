@@ -557,7 +557,7 @@ object ViewTreeWalker {
         val isImage = image.isImage
 
         val says = content != null || ownClick || isInput || role != null || (isClickable && text != null)
-        val box = composeBox(ownClick || isInput, bounds, visuals.drawBounds, visuals.margin, visuals.clickOutsideMargin)
+        val box = composeBox(ownClick || isInput, bounds, visuals.drawBounds, visuals.margin, visuals.clickBounds)
         val elementBounds = box.bounds
         if (elementBounds != null && (says || visuals.draws)) {
             val type = when {
@@ -640,10 +640,11 @@ object ViewTreeWalker {
      * is drawn, there, with the padding outside it as its margin. A node that takes touches
      * itself ([touchable]: its own click, or an input) and has no margin still takes them over
      * its whole box (a Material button's 48 dp touch area around its 40 dp shape), which is then
-     * its tap target. A margin is padding: when the click comes before it in the chain
-     * ([clickOutsideMargin]: clickable { }.padding(8.dp)) the click covers the whole box, which is
-     * the tap target; when the padding comes first (padding(8.dp).clickable { }) the click covers
-     * only the box inside it, and there is none. With no draw bounds the whole box is reported,
+     * its tap target. A margin is padding, and a click covers the box inside the padding that
+     * comes before it in the chain ([clickBounds]): the whole box for clickable { }.padding(8.dp),
+     * the box inside the outer 4 dp for padding(4.dp).clickable { }.padding(8.dp). That box is the
+     * tap target when it differs from the drawn one; for padding(8.dp).clickable { } it is the
+     * drawn box, and there is none. With no draw bounds the whole box is reported,
      * with no margin, so no stretch of screen is counted both as the element and as its margin.
      */
     internal fun composeBox(
@@ -651,10 +652,12 @@ object ViewTreeWalker {
         bounds: Bounds?,
         drawBounds: Bounds?,
         margin: MarginInfo?,
-        clickOutsideMargin: Boolean = false,
+        clickBounds: Bounds? = null,
     ): ComposeBox =
         if (drawBounds != null) {
-            ComposeBox(drawBounds, margin, tapTarget = if (touchable && (margin == null || clickOutsideMargin)) bounds else null)
+            // With no click modifier read (an input), the whole box when there is no margin.
+            val target = clickBounds ?: bounds.takeIf { margin == null }
+            ComposeBox(drawBounds, margin, tapTarget = if (touchable && target != drawBounds) target else null)
         } else {
             ComposeBox(bounds, null)
         }

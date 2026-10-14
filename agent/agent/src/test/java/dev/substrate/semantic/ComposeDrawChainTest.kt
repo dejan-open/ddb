@@ -648,10 +648,10 @@ class ComposeDrawChainTest {
         val node = Bounds(0, 0, 64, 64)
         val v = clickAndPadding(ClickableElement(), pad(8f))
         assertEquals(MarginInfo(8, 8, 8, 8), v.margin)
-        assertTrue(v.clickOutsideMargin)
+        assertEquals(node, v.clickBounds)
         assertEquals(
             ViewTreeWalker.ComposeBox(Bounds(8, 8, 48, 48), MarginInfo(8, 8, 8, 8), tapTarget = node),
-            ViewTreeWalker.composeBox(true, node, v.drawBounds, v.margin, v.clickOutsideMargin),
+            ViewTreeWalker.composeBox(true, node, v.drawBounds, v.margin, v.clickBounds),
         )
     }
 
@@ -662,10 +662,31 @@ class ComposeDrawChainTest {
         val node = Bounds(0, 0, 64, 64)
         val v = clickAndPadding(pad(8f), ClickableElement())
         assertEquals(MarginInfo(8, 8, 8, 8), v.margin)
-        assertFalse(v.clickOutsideMargin)
+        assertEquals(Bounds(8, 8, 48, 48), v.clickBounds)
         assertEquals(
             ViewTreeWalker.ComposeBox(Bounds(8, 8, 48, 48), MarginInfo(8, 8, 8, 8)),
-            ViewTreeWalker.composeBox(true, node, v.drawBounds, v.margin, v.clickOutsideMargin),
+            ViewTreeWalker.composeBox(true, node, v.drawBounds, v.margin, v.clickBounds),
+        )
+    }
+
+    @Test
+    fun a_click_between_two_paddings_taps_the_box_inside_the_outer_one() {
+        // Modifier.padding(4.dp).clickable { }.padding(8.dp).background(Red) on a 64 dp node at
+        // density 2 (128 px): the background is drawn inside 12 dp of margin, and the click covers
+        // the box inside the outer 4 dp, the inner 8 dp ring around the background included.
+        val node = Bounds(0, 0, 128, 128)
+        val v = readSized(
+            node, 2f,
+            SizedInfo(pad(4f), placed(0, 0, 128)),
+            SizedInfo(ClickableElement(), placed(8, 8, 112)),
+            SizedInfo(pad(8f), placed(8, 8, 112)),
+            SizedInfo(BackgroundElement(red, Any()), placed(24, 24, 80)),
+        )
+        assertEquals(MarginInfo(12, 12, 12, 12), v.margin)
+        assertEquals(Bounds(8, 8, 112, 112), v.clickBounds)
+        assertEquals(
+            ViewTreeWalker.ComposeBox(Bounds(24, 24, 80, 80), MarginInfo(12, 12, 12, 12), tapTarget = Bounds(8, 8, 112, 112)),
+            ViewTreeWalker.composeBox(true, node, v.drawBounds, v.margin, v.clickBounds),
         )
     }
 }
