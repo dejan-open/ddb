@@ -1,15 +1,21 @@
 package dev.substrate.semantic
 
+import androidx.compose.runtime.snapshots.FakeState
+import androidx.compose.runtime.snapshots.Snapshot
 import androidx.compose.ui.graphics.drawscope.ContentDrawScope
 import dev.substrate.semantic.ComposeVisuals.ContentDraw
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
+import org.junit.Assert.assertNull
+import org.junit.Assert.assertSame
+import org.junit.Assert.assertThrows
 import org.junit.Assert.assertTrue
 import org.junit.Test
 
 /**
  * ComposeVisuals.probeContentDraw: whether a drawWithContent block draws the content under it,
- * seen by running it once on a recording scope (the test doubles in FakeDrawScope.kt).
+ * seen by running it once on a recording scope (the test doubles in FakeDrawScope.kt) inside a
+ * read-only snapshot (FakeSnapshot.kt).
  */
 class ContentDrawProbeTest {
 
@@ -82,6 +88,59 @@ class ContentDrawProbeTest {
         // A block that swallows the probe's stop still counts as drawing the content.
         assertEquals(ContentDraw.CONTENT, probe(catchesEverything))
         assertTrue(thrown)
+    }
+
+    @Test
+    fun the_block_runs_in_a_read_only_snapshot_that_is_disposed() {
+        val before = Snapshot.taken.size
+        var inside: Snapshot? = null
+        assertEquals(ContentDraw.CONTENT, probe({ inside = Snapshot.current; drawContent() }))
+        // It ran inside the snapshot the probe took, which is left again and disposed, also
+        // when the run ends at drawContent().
+        assertEquals(before + 1, Snapshot.taken.size)
+        assertSame(Snapshot.taken.last(), inside)
+        assertNull(Snapshot.current)
+        assertTrue(Snapshot.taken.last().disposed)
+        // And when the block throws.
+        assertEquals(ContentDraw.UNKNOWN, probe({ error("platform canvas") }))
+        assertNull(Snapshot.current)
+        assertTrue(Snapshot.taken.last().disposed)
+    }
+
+    @Test
+    fun a_state_write_never_lands_and_keeps_the_content() {
+        val state = FakeState(0)
+        // A block that writes app state is stopped at the write: the state keeps its value, and
+        // the block is unknown, so the content stays in the capture (never seen skipped).
+        assertEquals(ContentDraw.UNKNOWN, probe({ state.value = 1; drawContent() }))
+        assertEquals(ContentDraw.UNKNOWN, probe({ state.value = 2 }))
+        assertEquals(ContentDraw.UNKNOWN, probe({ drawRect(0L); state.value = 3 }))
+        assertEquals(0, state.value)
+        // Reads are fine: the block still decides on what it reads.
+        val show = FakeState(true)
+        assertEquals(ContentDraw.CONTENT, probe({ if (show.value) drawContent() }))
+        show.value = false
+        assertEquals(ContentDraw.NOTHING, probe({ if (show.value) drawContent() }))
+        // A write after drawContent() never runs: the probe stops there.
+        assertEquals(ContentDraw.CONTENT, probe({ drawContent(); state.value = 4 }))
+        assertEquals(0, state.value)
+    }
+
+    @Test
+    fun with_no_read_only_snapshot_nothing_runs() {
+        // A class loader with no Compose runtime on its path (the bootstrap loader).
+        val noRuntime = object : ClassLoader(null) {}
+        var ran = false
+        assertFalse(ComposeVisuals.runInReadOnlySnapshot(noRuntime) { ran = true })
+        assertFalse(ran)
+        // With the runtime, the body runs, and its exception comes back as is.
+        val loader = javaClass.classLoader
+        assertTrue(ComposeVisuals.runInReadOnlySnapshot(loader) { ran = true })
+        assertTrue(ran)
+        val thrown = assertThrows(IllegalStateException::class.java) {
+            ComposeVisuals.runInReadOnlySnapshot(loader) { FakeState(0).value = 1 }
+        }
+        assertEquals("Cannot modify a state object in a read-only snapshot", thrown.message)
     }
 
     @Test

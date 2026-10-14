@@ -1259,13 +1259,26 @@ object ViewTreeWalker {
                 if (strokeWidth <= 0) return null
                 val colorField = GradientDrawable::class.java.getDeclaredField("mStrokeColors")
                 colorField.isAccessible = true
-                val strokeColor = (colorField.get(bg) as? android.content.res.ColorStateList)?.defaultColor?.let { colorToHex(it) }
-                BorderInfo(width = strokeWidth / density, color = strokeColor)
+                val strokeColor = (colorField.get(bg) as? android.content.res.ColorStateList)?.defaultColor
+                strokeBorder(strokeWidth, strokeColor, density)
             } catch (_: Exception) {
                 null
             }
         }
         return null
+    }
+
+    /**
+     * A GradientDrawable stroke as a border, or null when it draws nothing: no width, or a stroke
+     * color with zero alpha. GradientDrawable.draw strokes only when the stroke paint's alpha is
+     * above 0 (`haveStroke = currStrokeAlpha > 0 && ...`), and setStroke with no color list
+     * strokes Color.TRANSPARENT, so a missing color is a transparent one. The alpha check is the
+     * one Compose borders go through ([ComposeVisuals.argbHex]); the hex is the same as colorToHex's.
+     */
+    internal fun strokeBorder(strokeWidthPx: Int, strokeColor: Int?, density: Float): BorderInfo? {
+        if (strokeWidthPx <= 0 || strokeColor == null) return null
+        val color = ComposeVisuals.argbHex(strokeColor, keepTransparent = false) ?: return null
+        return BorderInfo(width = strokeWidthPx / density, color = color)
     }
 
     private fun extractGradient(view: View): GradientInfo? {

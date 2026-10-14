@@ -85,6 +85,25 @@ class DrawnElementTest {
     }
 
     @Test
+    fun a_view_stroke_with_zero_alpha_is_no_border() {
+        // GradientDrawable strokes only when the stroke paint's alpha is above 0, so a transparent
+        // stroke color is no border at any width: none is serialized, and it doesn't count toward
+        // drawsSomething.
+        assertEquals(null, ViewTreeWalker.strokeBorder(6, 0x00FF0000, density = 2f))
+        assertEquals(null, ViewTreeWalker.strokeBorder(6, 0, density = 2f))
+        // setStroke with no color list strokes Color.TRANSPARENT.
+        assertEquals(null, ViewTreeWalker.strokeBorder(6, null, density = 2f))
+        // No width, no border.
+        assertEquals(null, ViewTreeWalker.strokeBorder(0, 0xFF000000.toInt(), density = 2f))
+        // A visible stroke, however faint, is a border, its width in dp.
+        assertEquals(BorderInfo(3f, "#FF0000"), ViewTreeWalker.strokeBorder(6, 0xFFFF0000.toInt(), density = 2f))
+        assertEquals(BorderInfo(1f, "#01000000"), ViewTreeWalker.strokeBorder(2, 0x01000000, density = 2f))
+        // A clickable wrapper whose only draw is a transparent stroke is still a ghost.
+        val transparentStroke = ViewTreeWalker.strokeBorder(6, 0x00FF0000, density = 2f)
+        assertEquals(listOf("label"), survivors(element("p", parent, type = "button", clickable = true, border = transparentStroke)))
+    }
+
+    @Test
     fun image_block_writes_type_only_when_the_format_is_known() {
         assertEquals(emptyList<String>(), SemanticServer.imageYaml(null, null))
         assertEquals(emptyList<String>(), SemanticServer.imageYaml(null, "raster"))

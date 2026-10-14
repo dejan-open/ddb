@@ -71,10 +71,11 @@ internal object ComposeVisuals {
      * dropping a node that does draw would lose it entirely.
      *
      * drawWithContent and drawWithCache's onDrawWithContent also decide whether the content
-     * under them is drawn at all, which [probeContentDraw] observes: a block seen to return
-     * without calling drawContent() hides the rest of the chain and the children, and one that
-     * also drew nothing of its own is no draw. drawBehind always draws the content after its
-     * lambda (DrawBackgroundModifier.draw: onDraw(), then drawContent()).
+     * under them is drawn at all, which [probeContentDraw] observes by running the block once in
+     * a read-only snapshot: a block seen to return without calling drawContent() hides the rest
+     * of the chain and the children, and one that also drew nothing of its own is no draw.
+     * drawBehind always draws the content after its lambda (DrawBackgroundModifier.draw:
+     * onDraw(), then drawContent()).
      */
     private val CUSTOM_DRAW_ELEMENTS = setOf("DrawBehindElement", "DrawWithContentElement", "DrawWithCacheElement")
 
@@ -97,6 +98,54 @@ internal object ComposeVisuals {
     }
 
     private const val CONTENT_DRAW_SCOPE = "androidx.compose.ui.graphics.drawscope.ContentDrawScope"
+    private const val SNAPSHOT = "androidx.compose.runtime.snapshots.Snapshot"
+
+    /**
+     * Runs [body] inside a read-only Compose snapshot: `Snapshot.takeSnapshot()`, entered with
+     * `Snapshot.enter { }` and disposed afterwards (public runtime API, reached by reflection
+     * like everything else here). Inside it a state write throws (ReadonlySnapshot.recordModified
+     * reports "Cannot modify a state object in a read-only snapshot"), so the write never lands
+     * and never reaches the global snapshot, whose write observers are what schedule
+     * recomposition and draw invalidation. Reads register nothing: the snapshot is taken with no
+     * read observer, and Compose only tracks draw reads inside its own observer
+     * (NodeCoordinator's drawBlock runs the draw modifiers in snapshotObserver.observeReads).
+     *
+     * Returns false, without running [body], when no read-only snapshot can be taken (the
+     * runtime is not on [loader]'s path). An exception from [body] is rethrown as is.
+     */
+    fun runInReadOnlySnapshot(loader: ClassLoader?, body: () -> Unit): Boolean {
+        val snapshotClass: Class<*>
+        val companion: Any
+        val take: java.lang.reflect.Method
+        val enter: java.lang.reflect.Method
+        val dispose: java.lang.reflect.Method
+        try {
+            snapshotClass = Class.forName(SNAPSHOT, false, loader)
+            companion = snapshotClass.getField("Companion").get(null) ?: return false
+            take = companion.javaClass.getMethod("takeSnapshot", Function1::class.java)
+            enter = snapshotClass.getMethod("enter", Function0::class.java)
+            dispose = snapshotClass.getMethod("dispose")
+        } catch (_: Throwable) {
+            return false
+        }
+        // Every member is resolved before the snapshot exists, so a taken snapshot is always disposed.
+        val snapshot = try {
+            take.invoke(companion, null)
+        } catch (_: Throwable) {
+            null
+        } ?: return false
+        try {
+            enter.invoke(snapshot, body)
+        } catch (e: java.lang.reflect.InvocationTargetException) {
+            throw e.targetException
+        } finally {
+            try {
+                dispose.invoke(snapshot)
+            } catch (_: Throwable) {
+            }
+        }
+        return true
+    }
 
     /** Ends a probed block at its drawContent() call: the answer is known, and nothing after it runs. */
     private class ContentDrawn : RuntimeException() {
@@ -118,6 +167,13 @@ internal object ComposeVisuals {
      * the layer. The run ends at the first drawContent(), so nothing after it executes. A block
      * that throws first, for example by reaching for the platform canvas, is UNKNOWN, and the
      * caller keeps the content, as before: the capture never drops content it did not see skipped.
+     *
+     * The block runs inside a read-only Compose snapshot ([runInReadOnlySnapshot]), so it can
+     * read app state but not change it: a state write throws, which makes the block UNKNOWN,
+     * and nothing reaches the app's global snapshot. With no read-only snapshot available the
+     * block is not run at all, and is UNKNOWN. Compose itself runs these blocks whenever it
+     * redraws, as many times as it likes (every layer re-record, and every View.draw onto a
+     * software canvas, which re-runs the layer's draw block), so a run here is one more of those.
      */
     fun probeContentDraw(
         block: Any?,
@@ -129,20 +185,27 @@ internal object ComposeVisuals {
     ): ContentDraw {
         @Suppress("UNCHECKED_CAST")
         val fn = block as? Function1<Any?, Any?> ?: return ContentDraw.UNKNOWN
+        val loader = anchor.javaClass.classLoader
         val scopeClass = try {
-            Class.forName(CONTENT_DRAW_SCOPE, false, anchor.javaClass.classLoader)
+            Class.forName(CONTENT_DRAW_SCOPE, false, loader)
         } catch (_: Throwable) {
             return ContentDraw.UNKNOWN
         }
         val size = sizePx?.let { packSize(it.first.toFloat(), it.second.toFloat()) } ?: packSize(0f, 0f)
         val recorder = DrawRecorder(size, density, fontScale, layoutDirection)
         val scope = recorder.proxy(scopeClass) ?: return ContentDraw.UNKNOWN
-        val returned = try {
-            fn.invoke(scope)
-            true
+        var returned = false
+        val ran = try {
+            runInReadOnlySnapshot(loader) {
+                fn.invoke(scope)
+                returned = true
+            }
         } catch (_: Throwable) {
-            false
+            // The block ran and threw: at its drawContent() (the probe's stop), on a state
+            // write, or on anything else it reached for.
+            true
         }
+        if (!ran) return ContentDraw.UNKNOWN
         return when {
             recorder.contentDrawn -> ContentDraw.CONTENT
             !returned -> ContentDraw.UNKNOWN
