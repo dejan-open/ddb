@@ -108,6 +108,13 @@ class ComposeVisualsTest {
     }
 
     @Test
+    fun sp_packs_as_a_compose_text_unit() {
+        // TextUnitType.Sp is 0x1_0000_0000; the value's float bits sit in the low word.
+        assertEquals(0x1_0000_0000L or java.lang.Float.floatToRawIntBits(14f).toLong(), ComposeVisuals.packSp(14f))
+        assertEquals(17f, java.lang.Float.intBitsToFloat(ComposeVisuals.packSp(17f).toInt()), 0f)
+    }
+
+    @Test
     fun size_packs_like_an_offset() {
         assertEquals(Pair(1080f, 2400f), ComposeVisuals.unpackOffset(ComposeVisuals.packSize(1080f, 2400f)))
         assertEquals(pack(12.5f, 3f), ComposeVisuals.packSize(12.5f, 3f))

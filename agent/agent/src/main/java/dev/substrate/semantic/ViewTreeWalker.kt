@@ -462,6 +462,25 @@ object ViewTreeWalker {
         return true
     }
 
+    /** LayoutNode.zSortedChildren as a list, or null when this Compose release doesn't expose it. */
+    private fun zSortedChildren(node: Any): List<*>? = try {
+        val vector = node.javaClass.methods
+            .firstOrNull { it.parameterCount == 0 && (it.name == "getZSortedChildren" || it.name.startsWith("getZSortedChildren$")) }
+            ?.invoke(node)
+        when (vector) {
+            null -> null
+            is List<*> -> vector
+            // MutableVector keeps a backing array larger than its size.
+            else -> {
+                val size = vector.javaClass.methods.firstOrNull { it.name == "getSize" && it.parameterCount == 0 }?.invoke(vector) as? Int
+                val content = vector.javaClass.methods.firstOrNull { it.name == "getContent" && it.parameterCount == 0 }?.invoke(vector) as? Array<*>
+                if (size != null && content != null && size <= content.size) content.take(size) else null
+            }
+        }
+    } catch (_: Throwable) {
+        null
+    }
+
     private fun collectSemanticsConfigs(node: Any, out: MutableMap<Int, Any>) {
         val id = ComposeVisuals.invoke0(node, "getId") as? Int
         val config = ComposeVisuals.invoke0(node, "getConfig")
@@ -559,14 +578,17 @@ object ViewTreeWalker {
         }
         if (hidden) return
 
-        // LayoutNode.children is internal, so its getter is name-mangled
-        // (getChildren$ui); getChildrenInfo is the public fallback.
-        val methods = node.javaClass.methods.filter { it.parameterCount == 0 && List::class.java.isAssignableFrom(it.returnType) }
-        val children = (
-            methods.firstOrNull { it.name == "getChildren" || it.name.startsWith("getChildren$") }
-                ?: methods.firstOrNull { it.name == "getChildrenInfo" }
-            )?.let { m -> try { m.invoke(node) as? List<*> } catch (_: Throwable) { null } }
-            ?: return
+        // Paint order first: Compose draws children by zIndex, then placement order
+        // (zSortedChildren, an internal MutableVector), so z_index follows what is on top.
+        // LayoutNode.children (name-mangled getChildren$ui) and the public getChildrenInfo
+        // are the fallbacks, in declaration order.
+        val children = zSortedChildren(node) ?: run {
+            val methods = node.javaClass.methods.filter { it.parameterCount == 0 && List::class.java.isAssignableFrom(it.returnType) }
+            (
+                methods.firstOrNull { it.name == "getChildren" || it.name.startsWith("getChildren$") }
+                    ?: methods.firstOrNull { it.name == "getChildrenInfo" }
+                )?.let { m -> try { m.invoke(node) as? List<*> } catch (_: Throwable) { null } }
+        } ?: return
         for (child in children) {
             if (child != null) walkLayoutNode(child, configs, density, fontScale, resources, nextZ, out, log, isClickable, subtreeAlpha)
         }

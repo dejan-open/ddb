@@ -50,6 +50,9 @@ internal object ComposeVisuals {
         inheritedAlpha: Float = 1f,
     ): ComposeDrawInfo {
         val infos = invoke0(layoutNode, "getModifierInfo") as? List<*> ?: return ComposeDrawInfo()
+        // The node's own Compose Density: it carries the window's FontScaleConverter, so
+        // sp converts as Compose renders it (nonlinear at large font scales on Android 14+).
+        val composeDensity = invoke0(layoutNode, "getDensity")
         var v = ComposeDrawInfo()
         // Graphics-layer alpha fades everything after the layer in the chain (and the
         // subtree), and stacked layers multiply. ownAlpha is this node's layers only;
@@ -171,7 +174,7 @@ internal object ComposeVisuals {
                             shape = field(element, "shape"),
                         )
                     } else {
-                        blockLayer(element, density, fontScale, ownBounds(info) ?: nodeBounds)
+                        blockLayer(element, composeDensity, density, fontScale, ownBounds(info) ?: nodeBounds)
                     } ?: continue
                     val alpha = layer.alpha?.takeIf { it.isFinite() }?.coerceIn(0f, 1f)
                     if (alpha != null && alpha < 1f) ownAlpha *= alpha
@@ -208,7 +211,7 @@ internal object ComposeVisuals {
                     val color = textColorHex(producer, style, element, layerAlpha())
                     val maxLines = (field(element, "maxLines") as? Int)?.takeIf { it in 1 until Int.MAX_VALUE }
                     v = v.copy(
-                        font = v.font ?: font(style, fontScale, resources),
+                        font = v.font ?: font(style, composeDensity, fontScale, resources),
                         textColor = v.textColor ?: color,
                         maxLines = v.maxLines ?: maxLines,
                     )
@@ -366,7 +369,29 @@ internal object ComposeVisuals {
         }
     }
 
-    private fun font(style: Any?, fontScale: Float, resources: Resources?): FontInfo? {
+    /** A TextUnit in sp, packed as Compose packs it: the unit type in the high 32 bits, the value's bits low. */
+    fun packSp(value: Float): Long =
+        0x1_0000_0000L or (java.lang.Float.floatToRawIntBits(value).toLong() and 0xFFFFFFFFL)
+
+    /**
+     * The size in dp Compose renders [sizeSp] at, through the node's Density (its
+     * `TextUnit.toDp()` applies the FontScaleConverter). Null when that isn't reachable.
+     */
+    private fun spToDp(composeDensity: Any?, sizeSp: Float): Float? {
+        if (composeDensity == null) return null
+        return try {
+            composeDensity.javaClass.methods
+                .firstOrNull {
+                    it.name.startsWith("toDp") && it.parameterCount == 1 &&
+                        it.parameterTypes[0] == java.lang.Long.TYPE && it.returnType == java.lang.Float.TYPE
+                }
+                ?.invoke(composeDensity, packSp(sizeSp)) as? Float
+        } catch (_: Throwable) {
+            null
+        }?.takeIf { it.isFinite() && it > 0f }
+    }
+
+    private fun font(style: Any?, composeDensity: Any?, fontScale: Float, resources: Resources?): FontInfo? {
         if (style == null) return null
         val sizeSp = fontSizeSp(textUnitValue(style, invokePrefix(style, "getFontSize") as? Long)) ?: return null
         val family = invoke0(style, "getFontFamily")
@@ -391,7 +416,7 @@ internal object ComposeVisuals {
             }
             else -> familyName = family.javaClass.simpleName.lowercase()
         }
-        return FontInfo(family = familyName, weight = weightName(weight ?: 400), size = sizeSp * fontScale)
+        return FontInfo(family = familyName, weight = weightName(weight ?: 400), size = spToDp(composeDensity, sizeSp) ?: sizeSp * fontScale)
     }
 
     private fun cleanFamily(raw: String): String {
@@ -419,6 +444,14 @@ internal object ComposeVisuals {
     }
 
     private fun textColorHex(producer: Any?, style: Any?, anchor: Any, alpha: Float): String? {
+        // A TextStyle brush wins over the color producer and the style color, as in
+        // Compose's text draw. A gradient or shader has no single color to report (and is
+        // not black); a solid brush is its color at the style's alpha.
+        val styleBrush = style?.let { invokePrefix(it, "getBrush") }
+        if (styleBrush != null) {
+            val styleAlpha = (invokePrefix(style, "getAlpha") as? Float)?.takeIf { it.isFinite() } ?: 1f
+            return solidBrushHex(styleBrush, anchor, alpha * styleAlpha)
+        }
         val stylePacked = style?.let { invokePrefix(it, "getColor") as? Long }
         val packed = textColorPacked(producer != null, producerPacked(producer), stylePacked) ?: return null
         return colorHex(anchor, packed, alpha = alpha)
@@ -431,14 +464,15 @@ internal object ComposeVisuals {
      * fresh ReusableGraphicsLayerScope with the screen density (so `8.dp.toPx()` resolves as
      * it does on screen). Null when any of that is unavailable in this Compose release.
      */
-    private fun blockLayer(element: Any, density: Float, fontScale: Float, layerBounds: Bounds?): LayerProps? {
+    private fun blockLayer(element: Any, composeDensity: Any?, density: Float, fontScale: Float, layerBounds: Bounds?): LayerProps? {
         val block = (field(element, "block") ?: field(element, "layerBlock")) as? Function1<*, *> ?: return null
         return try {
             val loader = element.javaClass.classLoader
             val scopeClass = Class.forName("androidx.compose.ui.graphics.ReusableGraphicsLayerScope", false, loader)
             val scope = scopeClass.getDeclaredConstructor().apply { isAccessible = true }.newInstance()
-            val densityKt = Class.forName("androidx.compose.ui.unit.DensityKt", false, loader)
-            val densityObj = densityKt.methods
+            // The node's own Density (with its font-scale converter) when reachable, else
+            // one built from the screen density and font scale.
+            val densityObj = composeDensity ?: Class.forName("androidx.compose.ui.unit.DensityKt", false, loader).methods
                 .firstOrNull { it.name == "Density" && it.parameterCount == 2 }
                 ?.invoke(null, density, fontScale)
             if (densityObj != null) {
