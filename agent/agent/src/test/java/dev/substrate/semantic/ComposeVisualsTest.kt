@@ -215,6 +215,127 @@ class ComposeVisualsTest {
     }
 
     @Test
+    fun percent_corners_resolve_against_the_local_size() {
+        // RoundedCornerShape(50) on a 100x40 px box: half the smaller side.
+        assertEquals(20f, ComposeVisuals.cornerSizePx("PercentCornerSize", 50f, 2f, Pair(100, 40))!!, 0f)
+        // With no size there is nothing to take a percent of.
+        assertNull(ComposeVisuals.cornerSizePx("PercentCornerSize", 50f, 2f, null))
+        assertEquals(16f, ComposeVisuals.cornerSizePx("DpCornerSize", 8f, 2f, null)!!, 0f)
+        assertEquals(5f, ComposeVisuals.cornerSizePx("PxCornerSize", 5f, 2f, Pair(100, 40))!!, 0f)
+        assertNull(ComposeVisuals.cornerSizePx("SomeCustomCornerSize", 5f, 2f, Pair(100, 40)))
+        assertNull(ComposeVisuals.cornerSizePx("DpCornerSize", Float.NaN, 2f, null))
+        assertNull(ComposeVisuals.cornerSizePx("DpCornerSize", null, 2f, null))
+    }
+
+    @Test
+    fun corners_too_large_for_the_shape_are_scaled_down_as_compose_draws_them() {
+        // RoundedCornerShape(100.dp) at density 2 on a 96x48 px button: 200 + 200 px > 48 px,
+        // so both start corners scale down to 24 px.
+        assertEquals(24f, ComposeVisuals.drawnCornerPx(200f, 200f, Pair(96, 48)), 1e-4f)
+        // Corners that fit, and a 50% pill whose corners add up to exactly the smaller side.
+        assertEquals(16f, ComposeVisuals.drawnCornerPx(16f, 16f, Pair(96, 48)), 0f)
+        assertEquals(24f, ComposeVisuals.drawnCornerPx(24f, 24f, Pair(96, 48)), 0f)
+        // No size: nothing to scale against. An unknown bottom corner counts as 0.
+        assertEquals(200f, ComposeVisuals.drawnCornerPx(200f, 200f, null), 0f)
+        assertEquals(48f, ComposeVisuals.drawnCornerPx(100f, null, Pair(96, 48)), 1e-4f)
+    }
+
+    @Test
+    fun only_rounded_shapes_have_a_corner_radius() {
+        assertTrue("RoundedCornerShape" in ComposeVisuals.ROUNDED_SHAPES)
+        assertTrue("AbsoluteRoundedCornerShape" in ComposeVisuals.ROUNDED_SHAPES)
+        // Cut corners are bevels of the same size, not arcs.
+        assertFalse("CutCornerShape" in ComposeVisuals.ROUNDED_SHAPES)
+        assertFalse("AbsoluteCutCornerShape" in ComposeVisuals.ROUNDED_SHAPES)
+        assertFalse("RectangleShape" in ComposeVisuals.ROUNDED_SHAPES)
+    }
+
+    private fun em(value: Float): Long =
+        ComposeVisuals.TEXT_UNIT_EM or (java.lang.Float.floatToRawIntBits(value).toLong() and 0xFFFFFFFFL)
+
+    private val unspecifiedTextUnit = java.lang.Float.floatToRawIntBits(Float.NaN).toLong() and 0xFFFFFFFFL
+
+    @Test
+    fun style_font_size_reads_the_text_unit_type() {
+        assertEquals(20f, ComposeVisuals.styleFontSizeSp(ComposeVisuals.packSp(20f))!!, 0f)
+        assertEquals(14f, ComposeVisuals.styleFontSizeSp(unspecifiedTextUnit)!!, 0f)
+        // An em size at the style level scales the platform paint's size: no size to name.
+        assertNull(ComposeVisuals.styleFontSizeSp(em(1.5f)))
+        assertNull(ComposeVisuals.styleFontSizeSp(null))
+        assertEquals(1.5f, ComposeVisuals.textUnitValue(em(1.5f)), 0f)
+    }
+
+    private fun <T> span(start: Int, end: Int, value: T) = ComposeVisuals.SpanEffect<T>(start, end) { value }
+
+    @Test
+    fun a_full_range_span_sets_an_attribute_and_a_partial_one_mixes_it() {
+        val uniform = { v: String -> ComposeVisuals.OverText.Uniform(v) }
+        val mixed = ComposeVisuals.OverText.Mixed
+        assertEquals(uniform("black"), ComposeVisuals.overWholeText("black", 5, emptyList()))
+        assertEquals(uniform("red"), ComposeVisuals.overWholeText("black", 5, listOf(span(0, 5, "red"))))
+        assertEquals(mixed, ComposeVisuals.overWholeText("black", 5, listOf(span(0, 2, "red"))))
+        // A partial span that sets the value already there changes nothing.
+        assertEquals(uniform("black"), ComposeVisuals.overWholeText("black", 5, listOf(span(0, 2, "black"))))
+        // A later span wins where two overlap.
+        assertEquals(uniform("blue"), ComposeVisuals.overWholeText("black", 5, listOf(span(0, 2, "red"), span(0, 5, "blue"))))
+        assertEquals(mixed, ComposeVisuals.overWholeText("black", 5, listOf(span(0, 5, "blue"), span(3, 5, "red"))))
+        // Two spans that together cover the text with one value.
+        assertEquals(uniform("red"), ComposeVisuals.overWholeText("black", 5, listOf(span(0, 2, "red"), span(2, 5, "red"))))
+        // Spans Compose skips: empty, starting before the text, or ending past it.
+        assertEquals(
+            uniform("black"),
+            ComposeVisuals.overWholeText("black", 5, listOf(span(2, 2, "red"), span(-1, 5, "red"), span(0, 6, "red"))),
+        )
+        // A span that leaves the attribute alone, and an empty text.
+        assertEquals(uniform("black"), ComposeVisuals.overWholeText("black", 5, listOf(ComposeVisuals.SpanEffect<String>(0, 2, null))))
+        assertEquals(uniform("black"), ComposeVisuals.overWholeText("black", 0, listOf(span(0, 0, "red"))))
+        assertEquals("red", ComposeVisuals.OverText.Uniform("red").valueOrNull())
+        assertNull(mixed.valueOrNull())
+    }
+
+    @Test
+    fun span_font_sizes_replace_in_sp_and_scale_in_em() {
+        // The sp-to-dp conversion is the node's (nonlinear at large font scales): applied to sp only.
+        val toDp: (Float) -> Float = { it * 2f }
+        val sp20 = ComposeVisuals.fontSizeEffect(ComposeVisuals.packSp(20f), toDp)!!
+        val em15 = ComposeVisuals.fontSizeEffect(em(1.5f), toDp)!!
+        assertEquals(40f, sp20(28f)!!, 0f)
+        assertEquals(42f, em15(28f)!!, 0f)
+        assertNull(em15(null))
+        assertNull(ComposeVisuals.fontSizeEffect(unspecifiedTextUnit, toDp))
+        assertNull(ComposeVisuals.fontSizeEffect(null, toDp))
+        assertNull(ComposeVisuals.fontSizeEffect(ComposeVisuals.packSp(Float.NaN), toDp))
+        fun over(vararg spans: ComposeVisuals.SpanEffect<Float?>) = ComposeVisuals.overWholeText<Float?>(14f, 4, spans.toList())
+        assertEquals(ComposeVisuals.OverText.Uniform(21f), over(ComposeVisuals.SpanEffect(0, 4, em15)))
+        // Two em spans over the same text compound; an em span scales an sp span under it.
+        assertEquals(ComposeVisuals.OverText.Uniform(31.5f), over(ComposeVisuals.SpanEffect(0, 4, em15), ComposeVisuals.SpanEffect(0, 4, em15)))
+        assertEquals(ComposeVisuals.OverText.Uniform(60f), over(ComposeVisuals.SpanEffect(0, 4, sp20), ComposeVisuals.SpanEffect(0, 4, em15)))
+        assertEquals(ComposeVisuals.OverText.Mixed, over(ComposeVisuals.SpanEffect(0, 2, sp20)))
+    }
+
+    @Test
+    fun span_colors_draw_over_a_solid_foreground_and_span_brushes_over_anything() {
+        val red = 0xFFFF0000L shl 32
+        val black = ComposeVisuals.TextForeground.Solid(ComposeVisuals.BLACK_PACKED)
+        val brush = Any()
+        val redSpan = ComposeVisuals.foregroundEffect(red, null, 1f)!!
+        assertEquals(ComposeVisuals.TextForeground.Solid(red), redSpan(black))
+        assertEquals(ComposeVisuals.TextForeground.Solid(red), redSpan(null))
+        // Text drawn with a brush keeps it under a color span: the shader draws over the paint color.
+        val shader = ComposeVisuals.TextForeground.Shader(brush, 1f)
+        assertEquals(shader, redSpan(shader))
+        // A brush span replaces the color under it.
+        assertEquals(ComposeVisuals.TextForeground.Shader(brush, 0.5f), ComposeVisuals.foregroundEffect(null, brush, 0.5f)!!(black))
+        assertNull(ComposeVisuals.foregroundEffect(ComposeVisuals.UNSPECIFIED_COLOR, null, 1f))
+        assertNull(ComposeVisuals.foregroundEffect(null, null, 1f))
+        // Over a whole text: SpanStyle(color = Red) on all of it is red text; on part of it, no one color.
+        fun over(vararg spans: ComposeVisuals.SpanEffect<ComposeVisuals.TextForeground?>) =
+            ComposeVisuals.overWholeText<ComposeVisuals.TextForeground?>(black, 3, spans.toList())
+        assertEquals(ComposeVisuals.OverText.Uniform(ComposeVisuals.TextForeground.Solid(red)), over(ComposeVisuals.SpanEffect(0, 3, redSpan)))
+        assertEquals(ComposeVisuals.OverText.Mixed, over(ComposeVisuals.SpanEffect(0, 1, redSpan)))
+    }
+
+    @Test
     fun image_role_does_not_set_an_image_format() {
         // Role.Image with no recognised painter (a Canvas, custom drawing): an image, format unknown.
         assertEquals(ComposeVisuals.ImageFacts(isImage = true, imageType = null), ComposeVisuals.imageFacts(null, "Image"))

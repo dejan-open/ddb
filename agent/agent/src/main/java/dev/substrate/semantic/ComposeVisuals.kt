@@ -153,7 +153,7 @@ internal object ComposeVisuals {
                     v = v.copy(
                         background = v.background ?: solid,
                         gradient = v.gradient ?: grad ?: opaqueBrush,
-                        cornerRadius = v.cornerRadius ?: cornerRadius(field(element, "shape"), density, ownBounds(info) ?: nodeBounds),
+                        cornerRadius = v.cornerRadius ?: cornerRadius(field(element, "shape"), density, measuredSize(info, nodeBounds)),
                         drawBounds = firstDrawBounds(info),
                     )
                 }
@@ -172,7 +172,7 @@ internal object ComposeVisuals {
                     if (v.border == null) {
                         v = v.copy(
                             border = BorderInfo(width = width, color = color),
-                            cornerRadius = v.cornerRadius ?: cornerRadius(field(element, "shape"), density, ownBounds(info) ?: nodeBounds),
+                            cornerRadius = v.cornerRadius ?: cornerRadius(field(element, "shape"), density, measuredSize(info, nodeBounds)),
                             drawBounds = firstDrawBounds(info),
                         )
                     }
@@ -216,7 +216,7 @@ internal object ComposeVisuals {
                     if (elev != null) seenDraw = true
                     v = v.copy(
                         elevation = v.elevation ?: elev,
-                        cornerRadius = v.cornerRadius ?: cornerRadius(field(element, "shape"), density, ownBounds(info) ?: nodeBounds),
+                        cornerRadius = v.cornerRadius ?: cornerRadius(field(element, "shape"), density, measuredSize(info, nodeBounds)),
                         drawBounds = if (elev != null) firstDrawBounds(info) else v.drawBounds,
                     )
                 }
@@ -248,7 +248,7 @@ internal object ComposeVisuals {
                         alpha = if (ownAlpha < 1f) ownAlpha else v.alpha,
                         elevation = v.elevation ?: shadow,
                         cornerRadius = v.cornerRadius
-                            ?: if (layer.clip || shadow != null) cornerRadius(layer.shape, density, ownBounds(info) ?: nodeBounds) else null,
+                            ?: if (layer.clip || shadow != null) cornerRadius(layer.shape, density, measuredSize(info, nodeBounds)) else null,
                         drawBounds = if (shadow != null) firstDrawBounds(info) else v.drawBounds,
                     )
                 }
@@ -274,10 +274,12 @@ internal object ComposeVisuals {
                 in TEXT_ELEMENTS -> {
                     val style = field(element, "style")
                     val producer = field(element, "color")
-                    val color = textColorHex(producer, style, element, layerAlpha())
+                    // An AnnotatedString's span styles draw over the base style (a String has none).
+                    val spans = textSpans(field(element, "text"))
+                    val color = textColorHex(producer, style, spans, element, layerAlpha())
                     val maxLines = (field(element, "maxLines") as? Int)?.takeIf { it in 1 until Int.MAX_VALUE }
                     v = v.copy(
-                        font = v.font ?: font(style, composeDensity, fontScale, resources),
+                        font = v.font ?: font(style, spans, composeDensity, fontScale, resources),
                         textColor = v.textColor ?: color,
                         maxLines = v.maxLines ?: maxLines,
                     )
@@ -442,6 +444,127 @@ internal object ComposeVisuals {
         else -> null
     }
 
+    // A TextUnit packs its unit type in bits 32..39 and the value's float bits in the low word.
+    private const val TEXT_UNIT_MASK = 0xFFL shl 32
+    const val TEXT_UNIT_SP = 0x1L shl 32
+    const val TEXT_UNIT_EM = 0x2L shl 32
+
+    /** The value of a packed TextUnit (NaN for TextUnit.Unspecified). */
+    fun textUnitValue(packed: Long): Float = java.lang.Float.intBitsToFloat(packed.toInt())
+
+    /**
+     * A TextStyle's font size in sp: Compose's default when unspecified, the value when it is in
+     * sp, and null when it can't be read or is in em. An em size at the style level scales the
+     * platform paint's own text size, not a size this reader can name.
+     */
+    fun styleFontSizeSp(packed: Long?): Float? = when {
+        packed == null -> null
+        (packed and TEXT_UNIT_MASK) == TEXT_UNIT_SP -> fontSizeSp(textUnitValue(packed))
+        (packed and TEXT_UNIT_MASK) == 0L -> DEFAULT_FONT_SIZE_SP
+        else -> null
+    }
+
+    /**
+     * What a span's font size does to the size under it, both in dp: an sp size replaces it
+     * (Compose sets an AbsoluteSizeSpan) and an em size multiplies it (a RelativeSizeSpan, which
+     * compounds with another em span over the same text). Null when the span leaves it alone.
+     */
+    fun fontSizeEffect(packed: Long?, spToDp: (Float) -> Float): ((Float?) -> Float?)? {
+        if (packed == null) return null
+        val value = textUnitValue(packed)
+        if (!value.isFinite() || value <= 0f) return null
+        return when (packed and TEXT_UNIT_MASK) {
+            TEXT_UNIT_SP -> { _ -> spToDp(value) }
+            TEXT_UNIT_EM -> { size -> size?.times(value) }
+            else -> null
+        }
+    }
+
+    /** What a span sets for a text attribute it replaces outright; null when it leaves it alone. */
+    fun <T : Any> replaceEffect(value: T?): ((T?) -> T?)? = value?.let { v -> { _ -> v } }
+
+    /** One span style applied over the characters [start, end) of a text. */
+    class SpanEffect<T>(val start: Int, val end: Int, val effect: ((T) -> T)?)
+
+    /** An attribute's value over a whole text: one value throughout, or mixed between spans. */
+    sealed class OverText<out T> {
+        data class Uniform<out T>(val value: T) : OverText<T>()
+        object Mixed : OverText<Nothing>()
+
+        /** The value when it is the same over the whole text; null when it is mixed. */
+        fun valueOrNull(): T? = (this as? Uniform)?.value
+    }
+
+    /**
+     * An attribute's value over the whole of a [length]-char text, with [spans] applied in order
+     * over [base] as Compose's paragraph applies span styles: a later span wins where two overlap,
+     * and a span Compose skips (empty, or reaching outside the text) is skipped. A span over the
+     * whole text sets the value everywhere; when spans leave two parts of the text with different
+     * values, the attribute is [OverText.Mixed] and has no one value to report.
+     */
+    fun <T> overWholeText(base: T, length: Int, spans: List<SpanEffect<T>>): OverText<T> {
+        val applied = spans.filter { it.effect != null && it.start >= 0 && it.start < length && it.end > it.start && it.end <= length }
+        if (applied.isEmpty()) return OverText.Uniform(base)
+        // Between two consecutive span boundaries every character has the same spans over it.
+        val cuts = (applied.flatMap { listOf(it.start, it.end) } + 0 + length).distinct().sorted()
+        var result: OverText.Uniform<T>? = null
+        for (i in 0 until cuts.size - 1) {
+            val from = cuts[i]
+            val to = cuts[i + 1]
+            var value = base
+            for (span in applied) {
+                if (span.start <= from && span.end >= to) value = span.effect!!(value)
+            }
+            val seen = result
+            if (seen == null) {
+                result = OverText.Uniform(value)
+            } else if (seen.value != value) {
+                return OverText.Mixed
+            }
+        }
+        return result ?: OverText.Uniform(base)
+    }
+
+    /** What text is drawn with: one color, or a brush (a shader) with its alpha. */
+    sealed class TextForeground {
+        data class Solid(val packed: Long) : TextForeground()
+        data class Shader(val brush: Any, val alpha: Float) : TextForeground()
+    }
+
+    /**
+     * What a span's color or brush does to the text's foreground. A brush span sets the paint's
+     * shader, which replaces whatever was under it. A color span sets the paint's color, which a
+     * shader under it still draws over, so it changes only a solid (or unread) foreground. Null
+     * when the span sets neither.
+     */
+    fun foregroundEffect(color: Long?, brush: Any?, alpha: Float): ((TextForeground?) -> TextForeground?)? = when {
+        brush != null -> { _ -> TextForeground.Shader(brush, alpha) }
+        color != null && color != UNSPECIFIED_COLOR -> { under -> under as? TextForeground.Shader ?: TextForeground.Solid(color) }
+        else -> null
+    }
+
+    /**
+     * A text's span styles: its length, and each span's range and SpanStyle. A plain String, or
+     * an AnnotatedString whose spans can't be read, has none.
+     */
+    class TextSpans(val length: Int, val spans: List<Triple<Int, Int, Any>>) {
+        /** [base] with each span's effect (from [effectOf] on its SpanStyle) applied over the whole text. */
+        fun <T> resolve(base: T, effectOf: (Any) -> ((T) -> T)?): OverText<T> =
+            overWholeText(base, length, spans.map { (start, end, style) -> SpanEffect(start, end, effectOf(style)) })
+    }
+
+    private fun textSpans(text: Any?): TextSpans {
+        val string = invoke0(text, "getText") as? String ?: return TextSpans(0, emptyList())
+        val ranges = invoke0(text, "getSpanStyles") as? List<*> ?: return TextSpans(string.length, emptyList())
+        val spans = ranges.mapNotNull { range ->
+            val start = invoke0(range, "getStart") as? Int ?: return@mapNotNull null
+            val end = invoke0(range, "getEnd") as? Int ?: return@mapNotNull null
+            val style = invoke0(range, "getItem") ?: return@mapNotNull null
+            Triple(start, end, style)
+        }
+        return TextSpans(string.length, spans)
+    }
+
     // ---- reflection ----
 
     /** [top, bottom, start, end] in dp from a PaddingValues, or null when it can't be read. */
@@ -494,11 +617,22 @@ internal object ComposeVisuals {
         }?.takeIf { it.isFinite() && it > 0f }
     }
 
-    private fun font(style: Any?, composeDensity: Any?, fontScale: Float, resources: Resources?): FontInfo? {
+    /**
+     * The font the text draws with: the style's, with its AnnotatedString's span styles applied.
+     * Null when the size can't be read, or when spans give parts of the text a different family,
+     * weight or size (a mixed font has no one value to report).
+     */
+    private fun font(style: Any?, spans: TextSpans, composeDensity: Any?, fontScale: Float, resources: Resources?): FontInfo? {
         if (style == null) return null
-        val sizeSp = fontSizeSp(textUnitValue(style, invokePrefix(style, "getFontSize") as? Long)) ?: return null
-        val family = invoke0(style, "getFontFamily")
-        var weight = invoke0(invoke0(style, "getFontWeight"), "getWeight") as? Int
+        fun sizeDp(sp: Float): Float = spToDp(composeDensity, sp) ?: sp * fontScale
+        val baseSize = styleFontSizeSp(invokePrefix(style, "getFontSize") as? Long)?.let { sizeDp(it) }
+        val size = spans.resolve(baseSize) { fontSizeEffect(invokePrefix(it, "getFontSize") as? Long, ::sizeDp) }
+            .valueOrNull() ?: return null
+        val weightOver = spans.resolve(fontWeight(style)) { replaceEffect(fontWeight(it)) }
+        val familyOver = spans.resolve(invoke0(style, "getFontFamily")) { replaceEffect(invoke0(it, "getFontFamily")) }
+        if (weightOver is OverText.Mixed || familyOver is OverText.Mixed) return null
+        val family = familyOver.valueOrNull()
+        var weight = weightOver.valueOrNull()
         var familyName = "sans-serif"
         when (family?.javaClass?.simpleName) {
             null -> {}
@@ -519,8 +653,11 @@ internal object ComposeVisuals {
             }
             else -> familyName = classFamilyName(family.javaClass.simpleName)
         }
-        return FontInfo(family = familyName, weight = weightName(weight ?: 400), size = spToDp(composeDensity, sizeSp) ?: sizeSp * fontScale)
+        return FontInfo(family = familyName, weight = weightName(weight ?: 400), size = size)
     }
+
+    /** A TextStyle's or SpanStyle's font weight; null when it sets none. */
+    private fun fontWeight(style: Any?): Int? = invoke0(invoke0(style, "getFontWeight"), "getWeight") as? Int
 
     private fun cleanFamily(raw: String): String {
         var name = raw.lowercase()
@@ -534,30 +671,34 @@ internal object ComposeVisuals {
         return name
     }
 
-    private fun textUnitValue(anchor: Any, packed: Long?): Float? {
-        if (packed == null) return null
-        return try {
-            val cls = Class.forName("androidx.compose.ui.unit.TextUnit", false, anchor.javaClass.classLoader)
-            val m = cls.methods.firstOrNull { it.name.startsWith("getValue-impl") && it.parameterCount == 1 }
-            // NaN is TextUnit.Unspecified; fontSizeSp resolves it to the default.
-            m?.invoke(null, packed) as? Float
-        } catch (_: Throwable) {
-            null
-        }
-    }
+    /** A style's brush alpha: what Compose multiplies into a brush it draws text with. */
+    private fun brushAlpha(style: Any): Float = (invokePrefix(style, "getAlpha") as? Float)?.takeIf { it.isFinite() } ?: 1f
 
-    private fun textColorHex(producer: Any?, style: Any?, anchor: Any, alpha: Float): String? {
+    /**
+     * The one color the text draws with, or null when there is none to report: it can't be
+     * read, it is a gradient or shader (no single color, and not black), or spans give parts of
+     * the text different colors.
+     */
+    private fun textColorHex(producer: Any?, style: Any?, spans: TextSpans, anchor: Any, alpha: Float): String? {
         // A TextStyle brush wins over the color producer and the style color, as in
-        // Compose's text draw. A gradient or shader has no single color to report (and is
-        // not black); a solid brush is its color at the style's alpha.
+        // Compose's text draw; without one the paint takes the producer, the style's color,
+        // then black. Span colors and brushes then draw over that.
         val styleBrush = style?.let { invokePrefix(it, "getBrush") }
-        if (styleBrush != null) {
-            val styleAlpha = (invokePrefix(style, "getAlpha") as? Float)?.takeIf { it.isFinite() } ?: 1f
-            return solidBrushHex(styleBrush, anchor, alpha * styleAlpha)
+        val base = if (styleBrush != null) {
+            TextForeground.Shader(styleBrush, brushAlpha(style))
+        } else {
+            val stylePacked = style?.let { invokePrefix(it, "getColor") as? Long }
+            textColorPacked(producer != null, producerPacked(producer), stylePacked)?.let { TextForeground.Solid(it) }
         }
-        val stylePacked = style?.let { invokePrefix(it, "getColor") as? Long }
-        val packed = textColorPacked(producer != null, producerPacked(producer), stylePacked) ?: return null
-        return colorHex(anchor, packed, alpha = alpha)
+        val foreground = spans.resolve<TextForeground?>(base) {
+            foregroundEffect(invokePrefix(it, "getColor") as? Long, invokePrefix(it, "getBrush"), brushAlpha(it))
+        }.valueOrNull()
+        return when (foreground) {
+            is TextForeground.Solid -> colorHex(anchor, foreground.packed, alpha = alpha)
+            // A solid brush is its color at the brush's alpha.
+            is TextForeground.Shader -> solidBrushHex(foreground.brush, anchor, alpha * foreground.alpha)
+            null -> null
+        }
     }
 
     private class LayerProps(
@@ -676,20 +817,58 @@ internal object ComposeVisuals {
         return GradientInfo(type = type, colors = colors, orientation = orientation)
     }
 
-    /** Radius in dp of the top-start corner, the same corner the View path reports. */
-    private fun cornerRadius(shape: Any?, density: Float, nodeBounds: Bounds?): Float? {
-        if (shape == null) return null
-        val corner = field(shape, "topStart") ?: return null
-        val r = when (corner.javaClass.simpleName) {
-            "DpCornerSize" -> field(corner, "size") as? Float
-            "PxCornerSize" -> (field(corner, "size") as? Float)?.div(density)
-            "PercentCornerSize" -> {
-                val pct = field(corner, "percent") as? Float
-                if (pct != null && nodeBounds != null) pct / 100f * minOf(nodeBounds.w, nodeBounds.h) / density else null
-            }
-            else -> null
+    /**
+     * Shapes whose corners are arcs, so a corner size is a radius. A CutCornerShape (or
+     * AbsoluteCutCornerShape) keeps the same corner sizes as bevel lengths, and any other shape's
+     * corners are unknown: neither has a corner radius.
+     */
+    val ROUNDED_SHAPES = setOf("RoundedCornerShape", "AbsoluteRoundedCornerShape")
+
+    /**
+     * A corner size in px, as Compose's CornerSize.toPx resolves it against the shape's local
+     * [size] (px): a Dp through the density, px as is, a percent of the smaller side. Null when
+     * the kind is unknown or a percent has no size to resolve against.
+     */
+    fun cornerSizePx(kind: String?, value: Float?, density: Float, size: Pair<Int, Int>?): Float? {
+        if (value == null || !value.isFinite()) return null
+        val px = when (kind) {
+            "DpCornerSize" -> value * density
+            "PxCornerSize" -> value
+            "PercentCornerSize" -> size?.let { value / 100f * minOf(it.first, it.second) } ?: return null
+            else -> return null
         }
-        return r?.takeIf { it.isFinite() && it > 0f }
+        return px.takeIf { it.isFinite() && it >= 0f }
+    }
+
+    /**
+     * The top-start corner as it draws, in px. CornerBasedShape.createOutline scales a side's two
+     * corners down together when they add up to more than the shape's smaller side, so a
+     * RoundedCornerShape(100.dp) on a 48dp-high button draws 24dp corners. An unknown
+     * [bottomStart] counts as 0.
+     */
+    fun drawnCornerPx(topStart: Float, bottomStart: Float?, size: Pair<Int, Int>?): Float {
+        if (size == null) return topStart
+        val minSide = minOf(size.first, size.second).toFloat()
+        val sum = topStart + (bottomStart ?: 0f)
+        return if (sum > minSide && sum > 0f) topStart * (minSide / sum) else topStart
+    }
+
+    /**
+     * Radius in dp of the top-start corner, the same corner the View path reports, for a rounded
+     * shape drawn at [size]: the measured size of the modifier's coordinator, the local size
+     * Compose resolves the shape against (before any layer transform or ancestor clip, which
+     * window bounds include). Null for any shape that is not rounded.
+     */
+    private fun cornerRadius(shape: Any?, density: Float, size: Pair<Int, Int>?): Float? {
+        if (shape == null || shape.javaClass.simpleName !in ROUNDED_SHAPES) return null
+        fun cornerPx(name: String): Float? {
+            val corner = field(shape, name) ?: return null
+            val kind = corner.javaClass.simpleName
+            val value = field(corner, if (kind == "PercentCornerSize") "percent" else "size") as? Float
+            return cornerSizePx(kind, value, density, size)
+        }
+        val topStart = cornerPx("topStart") ?: return null
+        return (drawnCornerPx(topStart, cornerPx("bottomStart"), size) / density).takeIf { it.isFinite() && it > 0f }
     }
 
     private fun painterType(painter: Any?): String? {
@@ -705,8 +884,8 @@ internal object ComposeVisuals {
     /**
      * The measured size of the coordinator a modifier sits on (LayoutCoordinates.size): before
      * a layer's scale or rotation and any ancestor clip, which window bounds include. It is the
-     * size Compose gives a `graphicsLayer { }` block. Falls back to the node's bounds when the
-     * coordinator can't be read.
+     * size Compose gives a `graphicsLayer { }` block and resolves a modifier's shape against.
+     * Falls back to the node's bounds when the coordinator can't be read.
      */
     private fun measuredSize(info: Any, nodeBounds: Bounds?): Pair<Int, Int>? {
         val packed = invokePrefix(invoke0(info, "getCoordinates"), "getSize") as? Long
