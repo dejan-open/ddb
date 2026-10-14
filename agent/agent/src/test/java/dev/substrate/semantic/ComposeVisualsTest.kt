@@ -447,4 +447,43 @@ class ComposeVisualsTest {
         assertEquals(ComposeVisuals.ImageFacts(false, null), ComposeVisuals.imageFacts(null, "Button"))
         assertEquals(ComposeVisuals.ImageFacts(false, null), ComposeVisuals.imageFacts(null, null))
     }
+
+    @Test
+    fun a_tint_recolors_by_its_blend_mode() {
+        val halfRed = 0x80FF0000.toInt()
+        val blue = 0xFF0000FF.toInt()
+        // SrcIn, the default (no mode): the tint's color at the product of the two alphas.
+        assertEquals(0x800000FF.toInt(), ComposeVisuals.tinted(halfRed, blue, null))
+        assertEquals(0x800000FF.toInt(), ComposeVisuals.tinted(halfRed, blue, "SRC_IN"))
+        assertEquals(0x400000FF, ComposeVisuals.tinted(halfRed, 0x800000FF.toInt(), "SrcIn"))
+        // Src: the tint, whatever the pixel was.
+        assertEquals(blue, ComposeVisuals.tinted(halfRed, blue, "SRC"))
+        // SrcAtop: the pixel's alpha, the tint blended over its color by the tint's alpha.
+        assertEquals(0x800000FF.toInt(), ComposeVisuals.tinted(halfRed, blue, "SRC_ATOP"))
+        assertEquals(halfRed, ComposeVisuals.tinted(halfRed, 0x000000FF, "SrcAtop"))
+        assertEquals(0x807F0080.toInt(), ComposeVisuals.tinted(halfRed, 0x800000FF.toInt(), "SRC_ATOP"))
+        // A mode that isn't modelled: unknown.
+        assertNull(ComposeVisuals.tinted(halfRed, blue, "MULTIPLY"))
+    }
+
+    @Test
+    fun a_transparent_tint_hides_only_in_a_mode_that_replaces_the_pixels() {
+        assertTrue(ComposeVisuals.tintHides(0, null))
+        assertTrue(ComposeVisuals.tintHides(0x00FF0000, "SRC_IN"))
+        assertTrue(ComposeVisuals.tintHides(0, "Src"))
+        assertFalse(ComposeVisuals.tintHides(0, "SrcAtop"))
+        assertFalse(ComposeVisuals.tintHides(0, "SrcOver"))
+        assertFalse(ComposeVisuals.tintHides(0x01000000, null))
+    }
+
+    @Test
+    fun a_layer_scaled_to_zero_on_either_axis_collapses() {
+        assertTrue(ComposeVisuals.layerCollapsed(0f, 1f))
+        assertTrue(ComposeVisuals.layerCollapsed(1f, 0f))
+        assertTrue(ComposeVisuals.layerCollapsed(0f, null))
+        assertFalse(ComposeVisuals.layerCollapsed(0.5f, 0.5f))
+        assertFalse(ComposeVisuals.layerCollapsed(null, null))
+        // A mirrored layer (-1) still draws.
+        assertFalse(ComposeVisuals.layerCollapsed(-1f, 1f))
+    }
 }

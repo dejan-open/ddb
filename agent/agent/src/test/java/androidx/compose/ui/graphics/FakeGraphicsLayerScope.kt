@@ -10,4 +10,6 @@ class ReusableGraphicsLayerScope {
     var shadowElevation: Float = 0f
     var clip: Boolean = false
     var shape: Any? = null
+    var scaleX: Float = 1f
+    var scaleY: Float = 1f
 }

@@ -578,6 +578,10 @@ internal object ComposeVisuals {
                     // Image(alpha = 0f) / paint(alpha = 0f) / AsyncImage(alpha = 0f) draws nothing.
                     val painterAlpha = (field(element, "alpha") as? Float)?.takeIf { it.isFinite() } ?: 1f
                     if (painterAlpha <= 0f) continue
+                    // paint(painter, colorFilter = ColorFilter.tint(Color.Transparent)) replaces every
+                    // pixel the painter draws with a transparent one: nothing is on screen, as for a
+                    // painter that draws nothing (no image, no tint, no padding boundary).
+                    if (filterHides(field(element, "colorFilter"), element)) continue
                     val source = if (name == "ContentPainterElement") field(painterNode, "painter") else field(element, "painter")
                     // Coil's painter is an image loaded at run time, like a View bitmap with no
                     // resource, whatever painter it draws it with.
@@ -643,12 +647,17 @@ internal object ComposeVisuals {
                                 argb(element, field(element, "ambientShadowColor") as? Long),
                                 argb(element, field(element, "spotShadowColor") as? Long),
                             ),
+                            scaleX = field(element, "scaleX") as? Float,
+                            scaleY = field(element, "scaleY") as? Float,
                         )
                     } else {
                         blockLayer(element, composeDensity, density, fontScale, measuredSize(info, nodeBounds))
                     } ?: continue
                     val alpha = layer.alpha?.takeIf { it.isFinite() }?.coerceIn(0f, 1f)
                     if (alpha != null && alpha < 1f) ownAlpha *= alpha
+                    // scale(0f) collapses the layer to nothing: like alpha 0, it hides what follows
+                    // it and the subtree, and draws no shadow.
+                    if (layer.collapsed) ownAlpha = 0f
                     // A layer's shadow is drawn with the layer's own alpha: none at 0, and none
                     // after a skipped drawContent().
                     val shadow = layer.shadowPx
@@ -1179,7 +1188,20 @@ internal object ComposeVisuals {
         val clip: Boolean,
         val shape: Any?,
         val shadowColorsVisible: Boolean,
-    )
+        val scaleX: Float? = null,
+        val scaleY: Float? = null,
+    ) {
+        /** Scaled to 0 on either axis ([layerCollapsed]). */
+        val collapsed: Boolean get() = layerCollapsed(scaleX, scaleY)
+    }
+
+    /**
+     * Whether a graphics layer at [scaleX] × [scaleY] (null when unread) draws nothing: scaled to
+     * 0 on either axis, where its content has no area and the RenderNode is skipped (HWUI's
+     * RenderNode::nothingToDraw is true at scaleX or scaleY 0, as at alpha 0).
+     */
+    fun layerCollapsed(scaleX: Float?, scaleY: Float?): Boolean =
+        (scaleX != null && scaleX == 0f) || (scaleY != null && scaleY == 0f)
 
     /**
      * The layer properties a `graphicsLayer { … }` block sets, read by running the block on a
@@ -1228,6 +1250,8 @@ internal object ComposeVisuals {
                     argb(scope, field(scope, "ambientShadowColor") as? Long),
                     argb(scope, field(scope, "spotShadowColor") as? Long),
                 ),
+                scaleX = invokePrefix(scope, "getScaleX") as? Float,
+                scaleY = invokePrefix(scope, "getScaleY") as? Float,
             )
         } catch (_: Throwable) {
             null
@@ -1265,6 +1289,66 @@ internal object ComposeVisuals {
         if (filter == null) return null
         return (field(filter, "color") as? Long)?.let { colorHex(anchor, it, alpha = alpha) }
     }
+
+    /**
+     * Whether a painter's color filter leaves nothing of it on screen: a BlendModeColorFilter (what
+     * ColorFilter.tint makes, SrcIn by default) whose color is fully transparent, in a mode that
+     * replaces the painter's pixels with it ([tintHides]). Any other filter, or one whose color or
+     * mode can't be read, keeps the painter.
+     */
+    private fun filterHides(filter: Any?, anchor: Any): Boolean {
+        if (filter?.javaClass?.simpleName != "BlendModeColorFilter") return false
+        val color = argb(anchor, field(filter, "color") as? Long) ?: return false
+        if ((color ushr 24) != 0) return false
+        val mode = (field(filter, "blendMode") as? Int)?.let { blendModeName(anchor, it) } ?: return false
+        return tintHides(color, mode)
+    }
+
+    /**
+     * A Compose BlendMode's name (SrcIn, Src, …): the BlendMode companion constant whose value is
+     * [value], its getter's name without "get" and the value-class mangling (getSrcIn-0nO6VwU).
+     * Null when the class or no constant can be read.
+     */
+    private fun blendModeName(anchor: Any, value: Int): String? = try {
+        val companion = Class.forName("androidx.compose.ui.graphics.BlendMode", false, anchor.javaClass.classLoader)
+            .getField("Companion").get(null)
+        companion?.javaClass?.methods?.firstOrNull { m ->
+            m.parameterCount == 0 && m.returnType == Integer.TYPE && m.name.startsWith("get") && m.invoke(companion) == value
+        }?.name?.removePrefix("get")?.substringBefore('-')
+    } catch (_: Throwable) {
+        null
+    }
+
+    /** A blend mode in one spelling for both paths: BlendMode and PorterDuff's SRC_IN and Compose's SrcIn are "srcin". */
+    private fun modeKey(mode: String?): String = (mode ?: "SrcIn").replace("_", "").lowercase()
+
+    private val REPLACING_MODES = setOf("srcin", "src")
+
+    /**
+     * What a tint of color [tint] (ARGB) in blend [mode] turns a pixel of color [src] into
+     * (Porter-Duff, the tint as the source over the pixel): SrcIn (the default, null, for a
+     * Drawable tint and for ColorFilter.tint alike) keeps the tint's color at the product of the
+     * two alphas, Src is the tint itself, and SrcAtop keeps the pixel's alpha and blends the
+     * tint over its color by the tint's alpha (a transparent tint leaves it as it is). Null for
+     * any other mode, which isn't modelled.
+     */
+    fun tinted(src: Int, tint: Int, mode: String?): Int? = when (modeKey(mode)) {
+        "srcin" -> ((((tint ushr 24) * (src ushr 24) + 127) / 255) shl 24) or (tint and 0xFFFFFF)
+        "src" -> tint
+        "srcatop" -> {
+            val ta = tint ushr 24
+            fun channel(shift: Int) = (((tint shr shift) and 0xFF) * ta + ((src shr shift) and 0xFF) * (255 - ta) + 127) / 255
+            (src and 0xFF000000.toInt()) or (channel(16) shl 16) or (channel(8) shl 8) or channel(0)
+        }
+        else -> null
+    }
+
+    /**
+     * Whether a tint leaves nothing on screen: a fully transparent [tint] in a mode that replaces
+     * every pixel with it ([tinted]'s modes; null is the default, SrcIn). The one rule for image
+     * tints on both paths: an ImageView's tint and a Compose painter's color filter.
+     */
+    fun tintHides(tint: Int, mode: String?): Boolean = (tint ushr 24) == 0 && modeKey(mode) in REPLACING_MODES
 
     private fun solidBrushHex(brush: Any?, anchor: Any, alpha: Float = 1f): String? {
         if (brush?.javaClass?.simpleName != "SolidColor") return null
@@ -1378,8 +1462,12 @@ internal object ComposeVisuals {
         return floatArrayOf(ts * scale, te * scale, be * scale, bs * scale)
     }
 
-    /** RoundRect.minRadius: the smaller of [min] and what fits [radius1] + [radius2] in [limit]. */
-    private fun minRadius(min: Float, radius1: Float, radius2: Float, limit: Float): Float {
+    /**
+     * RoundRect.minRadius: the smaller of [min] and what fits [radius1] + [radius2] in [limit].
+     * SkRRect::scaleRadii takes the same factor, so the View path scales a GradientDrawable's
+     * radii with it too.
+     */
+    fun minRadius(min: Float, radius1: Float, radius2: Float, limit: Float): Float {
         val sum = radius1 + radius2
         return if (sum > limit && sum != 0f) minOf(min, limit / sum) else min
     }

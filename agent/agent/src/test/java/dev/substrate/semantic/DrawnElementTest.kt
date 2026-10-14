@@ -1,5 +1,6 @@
 package dev.substrate.semantic
 
+import dev.substrate.semantic.ViewTreeWalker.ComposeBox
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
@@ -74,7 +75,7 @@ class DrawnElementTest {
 
     @Test
     fun a_view_gradient_whose_every_stop_is_transparent_is_no_gradient() {
-        // A GradientDrawable fading between two transparent colors draws nothing: extractGradient
+        // A GradientDrawable fading between two transparent colors draws nothing: gradientInfo
         // reports no gradient, so none is serialized and it doesn't count toward drawsSomething.
         assertEquals(null, ViewTreeWalker.gradientStops(intArrayOf(0x00FF0000, 0x000000FF)))
         // A transparent stop among visible ones still shapes the fade and is kept.
@@ -108,18 +109,19 @@ class DrawnElementTest {
         val node = Bounds(0, 0, 100, 60)
         val drawn = Bounds(16, 16, 68, 28)
         val margin = MarginInfo(8, 8, 8, 8)
-        // padding(8).background(…) on a node that says something (text, a click, a role): the
-        // background's box, with the 8 dp outside it as the margin, not the whole node and the
-        // margin on top of it.
-        assertEquals(Pair(drawn, margin), ViewTreeWalker.composeBox(says = true, bounds = node, drawBounds = drawn, margin = margin))
+        // padding(8).clickable { }.background(…): the background's box, with the 8 dp outside it
+        // as the margin, not the whole node and the margin on top of it. The padding may sit
+        // outside the click, so it sets no tap target.
+        assertEquals(ComposeBox(drawn, margin), ViewTreeWalker.composeBox(touchable = true, bounds = node, drawBounds = drawn, margin = margin))
         // The same for a node that only draws.
-        assertEquals(Pair(drawn, margin), ViewTreeWalker.composeBox(says = false, bounds = node, drawBounds = drawn, margin = margin))
+        assertEquals(ComposeBox(drawn, margin), ViewTreeWalker.composeBox(touchable = false, bounds = node, drawBounds = drawn, margin = margin))
         // Draw bounds that can't be read: the whole node, and no margin counted on top of it.
-        assertEquals(Pair(node, null), ViewTreeWalker.composeBox(says = true, bounds = node, drawBounds = null, margin = margin))
-        // No margin: a node that says something keeps its whole box, one that only draws its draw's.
-        assertEquals(Pair(node, null), ViewTreeWalker.composeBox(says = true, bounds = node, drawBounds = drawn, margin = null))
-        assertEquals(Pair(drawn, null), ViewTreeWalker.composeBox(says = false, bounds = node, drawBounds = drawn, margin = null))
-        assertEquals(Pair(node, null), ViewTreeWalker.composeBox(says = false, bounds = node, drawBounds = null, margin = null))
+        assertEquals(ComposeBox(node, null), ViewTreeWalker.composeBox(touchable = true, bounds = node, drawBounds = null, margin = margin))
+        // No margin, as for a layout modifier that grows the box around the draw: the element is
+        // what is drawn, and a node that takes touches itself keeps its whole box as the tap target.
+        assertEquals(ComposeBox(drawn, null, tapTarget = node), ViewTreeWalker.composeBox(touchable = true, bounds = node, drawBounds = drawn, margin = null))
+        assertEquals(ComposeBox(drawn, null), ViewTreeWalker.composeBox(touchable = false, bounds = node, drawBounds = drawn, margin = null))
+        assertEquals(ComposeBox(node, null), ViewTreeWalker.composeBox(touchable = false, bounds = node, drawBounds = null, margin = null))
     }
 
     @Test

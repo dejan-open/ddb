@@ -2,8 +2,11 @@ package dev.substrate.semantic
 
 import androidx.compose.runtime.snapshots.FakeState
 import androidx.compose.runtime.snapshots.Snapshot
+import androidx.compose.ui.graphics.BlendMode
 import androidx.compose.ui.graphics.ReusableGraphicsLayerScope
 import androidx.compose.ui.graphics.drawscope.ContentDrawScope
+import androidx.compose.ui.layout.PlacedCoordinates
+import androidx.compose.ui.layout.WindowRect
 import coil3.compose.AsyncImagePainter
 import coil3.compose.FakeImageState
 import coil3.compose.FakeMutableState
@@ -24,7 +27,13 @@ class ComposeDrawChainTest {
     class DrawBehindElement
     class DrawWithContentElement(private val onDraw: (ContentDrawScope.() -> Unit)? = null)
     class DrawWithCacheElement
-    class GraphicsLayerElement(private val alpha: Float, private val clip: Boolean = false, private val shape: Any? = null)
+    class GraphicsLayerElement(
+        private val alpha: Float,
+        private val clip: Boolean = false,
+        private val shape: Any? = null,
+        private val scaleX: Float = 1f,
+        private val scaleY: Float = 1f,
+    )
     class PaddingElement(
         private val start: Float,
         private val top: Float,
@@ -457,7 +466,12 @@ class ComposeDrawChainTest {
     // Painters: Modifier.paint / Image, and Coil 3's AsyncImage elements, with their fields.
     class BitmapPainter
     class ColorPainter(private val color: Long)
-    class PainterElement(private val painter: Any?)
+    class VectorPainter
+    class PainterElement(private val painter: Any?, private val colorFilter: Any? = null)
+
+    // ColorFilter.tint(color, blendMode): a BlendModeColorFilter, with the packed color and the
+    // BlendMode's value (the fake BlendMode in FakeBlendMode.kt names them).
+    class BlendModeColorFilter(private val color: Long, private val blendMode: Int)
     class ContentPainterElement
     class SubcomposeContentPainterElement(private val painter: Any?)
     class ContentPainterNode(private val painter: Any?) : ChainNode()
@@ -541,5 +555,80 @@ class ComposeDrawChainTest {
         val chain = ComposeDrawInfo(font = FontInfo("serif", "bold", 20f), textColor = "#00FF00")
         assertEquals(chain, ComposeVisuals.withLayoutText(chain, layout, null, 1f, null, alpha = 1f))
         assertEquals(ComposeDrawInfo(), ComposeVisuals.withLayoutText(ComposeDrawInfo(), null, null, 1f, null, alpha = 1f))
+    }
+
+    /** Color.Transparent, packed: ARGB 0 in the high 32 bits. */
+    private val transparent = 0L
+
+    private fun tint(color: Long, mode: Int = BlendMode.SrcIn) = BlendModeColorFilter(color, mode)
+
+    @Test
+    fun a_transparent_tint_that_replaces_the_painter_hides_it() {
+        // paint(vectorPainter, colorFilter = ColorFilter.tint(Color.Transparent)): SrcIn turns every
+        // pixel the painter draws transparent, so nothing is on screen: no image, no tint, no draw.
+        val hidden = read(PainterElement(VectorPainter(), tint(transparent)))
+        assertNull(hidden.imageType)
+        assertNull(hidden.imageTint)
+        assertFalse(hidden.draws)
+        // Src replaces the pixels the same way.
+        assertNull(read(PainterElement(VectorPainter(), tint(transparent, BlendMode.Src))).imageType)
+        // Nothing drawn, so no padding boundary: all of it is the node's own.
+        assertNull(read(pad(8f), PainterElement(VectorPainter(), tint(transparent)), pad(4f)).margin)
+        // SrcAtop draws the tint over the painter's pixels: a transparent one leaves them as they are.
+        assertEquals("vector", read(PainterElement(VectorPainter(), tint(transparent, BlendMode.SrcAtop))).imageType)
+        // A visible tint keeps the image, in the tint's color.
+        val tinted = read(PainterElement(VectorPainter(), tint(red)))
+        assertEquals("vector", tinted.imageType)
+        assertEquals("#FF0000", tinted.imageTint)
+    }
+
+    @Test
+    fun a_layer_scaled_to_zero_hides_what_follows_it() {
+        // size(12.dp).scale(0f).background(Red): the layer has no area, so the background is not
+        // on screen and the node is skipped, as at alpha 0.
+        // The walk skips a node whose subtree alpha (inherited × its own layers', `alpha`) hides it.
+        fun skipped(v: ComposeDrawInfo) = v.hidesContent(v.alpha ?: 1f)
+        val collapsed = read(GraphicsLayerElement(1f, scaleX = 0f, scaleY = 0f), BackgroundElement(red, Any()))
+        assertNull(collapsed.background)
+        assertFalse(collapsed.draws)
+        assertTrue(skipped(collapsed))
+        // One axis at 0 is enough.
+        assertNull(read(GraphicsLayerElement(1f, scaleY = 0f), BackgroundElement(red, Any())).background)
+        // scale(0.5f) shrinks it, but it is still drawn.
+        val half = read(GraphicsLayerElement(1f, scaleX = 0.5f, scaleY = 0.5f), BackgroundElement(red, Any()))
+        assertEquals("#FF0000", half.background)
+        assertFalse(skipped(half))
+        // graphicsLayer { scaleX = 0f } is read from the block the same way.
+        val block = readLayered(BlockGraphicsLayerElement { it.scaleX = 0f }, BackgroundElement(red, Any()))
+        assertNull(block.background)
+        assertTrue(skipped(block))
+        val halfBlock = readLayered(BlockGraphicsLayerElement { it.scaleX = 0.5f; it.scaleY = 0.5f }, BackgroundElement(red, Any()))
+        assertEquals("#FF0000", halfBlock.background)
+    }
+
+    // Material 3's minimumInteractiveComponentSize(): a layout modifier that grows the node's box.
+    class MinimumInteractiveModifier
+
+    private fun placed(left: Int, top: Int, size: Int) =
+        PlacedCoordinates(WindowRect(left.toFloat(), top.toFloat(), (left + size).toFloat(), (top + size).toFloat()))
+
+    @Test
+    fun a_minimum_interactive_size_reports_the_drawn_shape_and_taps_the_whole_box() {
+        // Surface(onClick = …, modifier = Modifier.size(40.dp)) in Material 3: the node is 48 × 48,
+        // and the surface's background is drawn 40 × 40 in the middle of it.
+        val node = Bounds(0, 0, 48, 48)
+        val v = readSized(
+            node, 1f,
+            SizedInfo(MinimumInteractiveModifier(), placed(0, 0, 48)),
+            SizedInfo(BackgroundElement(red, Any()), placed(4, 4, 40)),
+        )
+        val drawn = Bounds(4, 4, 40, 40)
+        assertEquals(drawn, v.drawBounds)
+        assertNull(v.margin)
+        // The element is the 40 dp shape; a tap anywhere in the 48 dp box still lands on it.
+        assertEquals(
+            ViewTreeWalker.ComposeBox(drawn, null, tapTarget = node),
+            ViewTreeWalker.composeBox(touchable = true, bounds = node, drawBounds = v.drawBounds, margin = v.margin),
+        )
     }
 }

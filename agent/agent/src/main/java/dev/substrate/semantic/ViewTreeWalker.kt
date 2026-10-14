@@ -7,6 +7,7 @@ import android.graphics.Rect
 import android.graphics.Typeface
 import android.graphics.drawable.BitmapDrawable
 import android.graphics.drawable.ColorDrawable
+import android.graphics.drawable.Drawable
 import android.graphics.drawable.GradientDrawable
 import android.graphics.drawable.RippleDrawable
 import android.graphics.drawable.VectorDrawable
@@ -161,7 +162,9 @@ object ViewTreeWalker {
             val effectiveExternal = isExternal || parentExternal
 
             if (effectivelyHidden) {
-                val element = buildElement(view, bounds, density, nextZ(), effectiveExternal)
+                // INVISIBLE or at alpha 0 (or under such a parent), the container draws nothing:
+                // its element is structure only, with nothing of its background or image.
+                val element = buildElement(view, bounds, density, nextZ(), effectiveExternal, hidden = true)
                 elements.add(element)
                 log.appendLine(
                     "EMIT $tag z=${element.zIndex} type=${element.type} bounds=$bounds hidden_container=true vis=${view.visibility} alpha=${view.alpha} children=$childCount",
@@ -270,12 +273,18 @@ object ViewTreeWalker {
 
     private var imageOutputDir: java.io.File? = null
 
+    /**
+     * One View as an element. A [hidden] view (INVISIBLE, at alpha 0, or under such a parent)
+     * draws nothing, so it is reported as structure only: its type, bounds, text and semantics,
+     * with no color, background, corner radius, border, gradient, shadow or image.
+     */
     private fun buildElement(
         view: View,
         bounds: Bounds,
         density: Float,
         z: Int,
         isExternal: Boolean,
+        hidden: Boolean = false,
     ): SemanticElement {
         val resourceId = extractResourceId(view)
         val content: String?
@@ -292,14 +301,14 @@ object ViewTreeWalker {
             is EditText -> {
                 content = view.text?.toString()?.ifEmpty { view.hint?.toString() }
                 font = extractFont(view, density)
-                textColor = colorToHex(view.currentTextColor)
+                textColor = visibleColor(view.currentTextColor)
                 type = "input"
             }
 
             is TextView -> {
                 content = view.text?.toString()
                 font = extractFont(view, density)
-                textColor = colorToHex(view.currentTextColor)
+                textColor = visibleColor(view.currentTextColor)
                 lineCount = view.lineCount.takeIf { it > 0 }
                 truncated =
                     view.layout?.let { layout ->
@@ -311,11 +320,15 @@ object ViewTreeWalker {
 
             is ImageView -> {
                 content = view.contentDescription?.toString()
-                textColor = imageTint(view)
-                val imgInfo = extractImageInfo(view, resourceId ?: "image_${bounds.x}_${bounds.y}")
-                imageResource = imgInfo?.first
-                imageType = imgInfo?.second
-                imagePath = imgInfo?.third
+                // A transparent tint that replaces the image's pixels leaves no image on screen:
+                // no image block, no file written for it, no tint.
+                if (!hidden && !imageTintHides(view)) {
+                    textColor = imageTint(view)
+                    val imgInfo = extractImageInfo(view, resourceId ?: "image_${bounds.x}_${bounds.y}")
+                    imageResource = imgInfo?.first
+                    imageType = imgInfo?.second
+                    imagePath = imgInfo?.third
+                }
                 type = "image"
             }
 
@@ -368,7 +381,8 @@ object ViewTreeWalker {
             }
 
         val elev = view.elevation + view.translationZ
-        val elevDp = if (elev > 0f) elev / density else null
+        val elevDp = if (elev > 0f && !hidden && shadowColorsVisible(view)) elev / density else null
+        val background = if (hidden) null else viewBackground(view, density)
 
         return SemanticElement(
             id = id,
@@ -376,7 +390,7 @@ object ViewTreeWalker {
             type = type,
             content = content,
             font = font,
-            color = textColor,
+            color = if (hidden) null else textColor,
             bounds = bounds,
             zIndex = z,
             clickable = view.isClickable || hasClickableAncestor(view),
@@ -384,8 +398,8 @@ object ViewTreeWalker {
             accessible = view.isImportantForAccessibility,
             a11yLabel = view.contentDescription?.toString(),
             a11yId = resourceId,
-            background = extractBackgroundColor(view),
-            cornerRadius = extractCornerRadius(view)?.let { it / density },
+            background = background?.fill,
+            cornerRadius = background?.cornerRadiusPx?.let { it / density },
             padding = padding,
             margin = margin,
             elevation = elevDp,
@@ -395,9 +409,10 @@ object ViewTreeWalker {
             imageResource = imageResource,
             imageType = imageType,
             imagePath = imagePath,
-            border = extractBorder(view, density),
-            gradient = extractGradient(view),
+            border = background?.border,
+            gradient = background?.gradient,
             tapTarget = if (!view.isClickable && !view.isLongClickable) findClickableAncestorBounds(view) else null,
+            customDraw = background?.customDraw ?: false,
         )
     }
 
@@ -542,7 +557,8 @@ object ViewTreeWalker {
         val isImage = image.isImage
 
         val says = content != null || ownClick || isInput || role != null || (isClickable && text != null)
-        val (elementBounds, margin) = composeBox(says, bounds, visuals.drawBounds, visuals.margin)
+        val box = composeBox(ownClick || isInput, bounds, visuals.drawBounds, visuals.margin)
+        val elementBounds = box.bounds
         if (elementBounds != null && (says || visuals.draws)) {
             val type = when {
                 isInput -> "input"
@@ -577,13 +593,13 @@ object ViewTreeWalker {
                     a11yLabel = contentDesc, a11yId = null,
                     background = visuals.background,
                     cornerRadius = visuals.cornerRadius,
-                    padding = visuals.padding, margin = margin,
+                    padding = visuals.padding, margin = box.margin,
                     elevation = visuals.elevation, render = null,
                     lineCount = layout?.first, truncated = layout?.second,
                     imageResource = if (isImage) id else null,
                     imageType = image.imageType,
                     imagePath = null,
-                    border = visuals.border, gradient = visuals.gradient, tapTarget = null,
+                    border = visuals.border, gradient = visuals.gradient, tapTarget = box.tapTarget,
                     customDraw = visuals.customDraw,
                 ),
             )
@@ -614,19 +630,25 @@ object ViewTreeWalker {
     fun textTruncated(ellipsized: Boolean?, exceededMaxLines: Boolean?): Boolean? =
         if (ellipsized == null && exceededMaxLines == null) null else ellipsized == true || exceededMaxLines == true
 
+    /** The box a Compose element reports: its bounds, its margin, and where a tap on it lands. */
+    internal data class ComposeBox(val bounds: Bounds?, val margin: MarginInfo?, val tapTarget: Bounds? = null)
+
     /**
-     * The bounds and margin a Compose element reports. Its margin is the padding outside its
-     * first draw, so it goes with that draw's bounds, which sit inside it ([drawBounds]); a node
-     * that only says something (text, a click, a role, an input) and has no margin is reported
-     * over its whole box. When a margin's draw bounds can't be read the whole box is reported
-     * with no margin, so no stretch of screen is counted both as the element and as its margin.
+     * The box a Compose element reports. When its first draw sits inside the node's box
+     * ([drawBounds]: an outer padding, or a layout modifier that grows the box around it, as
+     * minimumInteractiveComponentSize does around a 40 dp Material button) the element is what
+     * is drawn, there, with the padding outside it as its margin. A node that takes touches
+     * itself ([touchable]: its own click, or an input) and has no margin still takes them over
+     * its whole box (a Material button's 48 dp touch area around its 40 dp shape), which is then
+     * its tap target. A margin is padding, which may sit outside the click, so it sets none. With
+     * no draw bounds the whole box is reported, with no margin, so no stretch of screen is counted
+     * both as the element and as its margin.
      */
-    internal fun composeBox(says: Boolean, bounds: Bounds?, drawBounds: Bounds?, margin: MarginInfo?): Pair<Bounds?, MarginInfo?> =
-        when {
-            margin != null && drawBounds != null -> Pair(drawBounds, margin)
-            margin != null -> Pair(bounds, null)
-            says -> Pair(bounds, null)
-            else -> Pair(drawBounds ?: bounds, null)
+    internal fun composeBox(touchable: Boolean, bounds: Bounds?, drawBounds: Bounds?, margin: MarginInfo?): ComposeBox =
+        if (drawBounds != null) {
+            ComposeBox(drawBounds, margin, tapTarget = if (touchable && margin == null) bounds else null)
+        } else {
+            ComposeBox(bounds, null)
         }
 
     /** The TextLayoutResult the node's GetTextLayoutResult semantics action returns, or null. */
@@ -1170,30 +1192,160 @@ object ViewTreeWalker {
         return name
     }
 
-    private fun extractBackgroundColor(view: View): String? = extractDrawableColor(view.background)
+    // ---- View backgrounds ----
 
-    private fun extractDrawableColor(drawable: android.graphics.drawable.Drawable?): String? =
-        when (drawable) {
-            is ColorDrawable -> {
-                colorToHex(drawable.color)
-            }
+    /**
+     * A color as the capture reports it: its hex, or null when it is fully transparent and so
+     * draws nothing. The one visible-color rule, the same on both paths: every View color (fills,
+     * strokes, text, tints) goes through it, as every Compose color does
+     * ([ComposeVisuals.argbHex], which it is). Gradient stops are the one exception: a transparent
+     * stop still shapes the fade ([gradientStops]).
+     */
+    internal fun visibleColor(argb: Int): String? = ComposeVisuals.argbHex(argb, keepTransparent = false)
 
-            is GradientDrawable -> {
-                gradientFill(drawable)
-            }
+    /**
+     * Whether a View's shadow shows, by its colors (outlineAmbientShadowColor and
+     * outlineSpotShadowColor, API 28; black before): two fully transparent ones draw nothing,
+     * the rule Compose shadows go through ([ComposeVisuals.shadowColorsVisible]).
+     */
+    internal fun shadowColorsVisible(view: View): Boolean =
+        Build.VERSION.SDK_INT < 28 ||
+            ComposeVisuals.shadowColorsVisible(view.outlineAmbientShadowColor, view.outlineSpotShadowColor)
 
-            is RippleDrawable -> {
-                if (drawable.numberOfLayers > 0) {
-                    extractDrawableColor(drawable.getDrawable(0))
-                } else {
-                    null
-                }
-            }
-
-            else -> {
-                null
-            }
+    /**
+     * The layer of a background that draws. A RippleDrawable draws every layer but its mask
+     * (android.R.id.mask), which only bounds the ripple (RippleDrawable.drawContent skips it): its
+     * first other layer, or null when the mask is all it has. Any other drawable is its own layer.
+     */
+    internal fun drawnLayer(background: Drawable?): Drawable? {
+        if (background !is RippleDrawable) return background
+        for (i in 0 until background.numberOfLayers) {
+            if (background.getId(i) != android.R.id.mask) return background.getDrawable(i)
         }
+        return null
+    }
+
+    /** What a View's background draws: fill, corner radius (px), border, gradient. */
+    internal class DrawnBackground(
+        val fill: String? = null,
+        val cornerRadiusPx: Float? = null,
+        val border: BorderInfo? = null,
+        val gradient: GradientInfo? = null,
+        /**
+         * It draws something the fields above can't describe: a GradientDrawable line or ring.
+         * Not serialized; it keeps the element from being taken for an empty ghost touch target.
+         */
+        val customDraw: Boolean = false,
+    )
+
+    /**
+     * A View's background as it draws: the layer that draws ([drawnLayer]), with the View's
+     * background tint ([backgroundTint]). A ColorDrawable is a fill; a GradientDrawable is read
+     * by [gradientBackground]. Null for any other drawable, or no background.
+     */
+    internal fun viewBackground(view: View, density: Float): DrawnBackground? {
+        val layer = drawnLayer(view.background) ?: return null
+        val tint = backgroundTint(view, layer)
+        return when (layer) {
+            // getColor() is the color with the drawable's alpha already applied (setAlpha).
+            is ColorDrawable -> DrawnBackground(fill = visibleColor(tinted(layer.color, tint)))
+            is GradientDrawable -> gradientBackground(layer, density, tint, view.width, view.height)
+            else -> null
+        }
+    }
+
+    /** A tint resolved for a drawable: its color, and its blend mode's name (null: the default, SRC_IN). */
+    internal class Tint(val color: Int, val mode: String?)
+
+    /**
+     * A View's background tint (backgroundTint), resolved as the drawable resolves it at its own
+     * state (Drawable.updateTintFilter: `getColorForState(getState(), Color.TRANSPARENT)`), with
+     * the View's tint blend mode (null when unset: the drawable default, SRC_IN). View hands both
+     * to its background (applyBackgroundTint), and a RippleDrawable to its layers. Null with no
+     * tint, or when [layer] has a color filter of its own: ColorDrawable and GradientDrawable both
+     * draw with that one and ignore the tint's.
+     */
+    internal fun backgroundTint(view: View, layer: Drawable): Tint? {
+        if (layer.colorFilter != null) return null
+        val color = stateColor(view.backgroundTintList, layer.state, android.graphics.Color.TRANSPARENT) ?: return null
+        val mode = if (Build.VERSION.SDK_INT >= 29) view.backgroundTintBlendMode?.name else view.backgroundTintMode?.name
+        return Tint(color, mode)
+    }
+
+    /** [argb] under [tint] ([ComposeVisuals.tinted]); unchanged with no tint, or a mode that isn't modelled. */
+    internal fun tinted(argb: Int, tint: Tint?): Int = tint?.let { ComposeVisuals.tinted(argb, it.color, it.mode) } ?: argb
+
+    /**
+     * [argb] with its alpha modulated by a drawable's own alpha ([drawableAlpha], 0..255) the way
+     * GradientDrawable.draw modulates its fill and stroke paints (modulateAlpha:
+     * `alpha * (a + (a >> 7)) >> 8`): 255 keeps it, 0 clears it.
+     */
+    internal fun modulate(argb: Int, drawableAlpha: Int): Int {
+        val a = drawableAlpha.coerceIn(0, 255)
+        val alpha = ((argb ushr 24) * (a + (a shr 7))) shr 8
+        return (alpha shl 24) or (argb and 0xFFFFFF)
+    }
+
+    /**
+     * What a GradientDrawable draws, by its shape (GradientDrawable.draw): a RECTANGLE fills and
+     * strokes its rect with its corner radius clamped to it ([gradientCornerRadius]); an OVAL
+     * fills and strokes the oval in it, whose corner radius is half the rect's smaller side; a
+     * LINE draws only its stroke, as a line across the middle, and a RING only its ring path:
+     * neither is a fill, border or gradient of the box, and either is a custom draw when what it
+     * draws is visible. [viewW] × [viewH] is the View's size, the drawable's bounds until the
+     * View sets them.
+     */
+    internal fun gradientBackground(drawable: GradientDrawable, density: Float, tint: Tint?, viewW: Int, viewH: Int): DrawnBackground {
+        val rect = drawnRectSize(drawable, viewW, viewH)
+        val fill = gradientFill(drawable, tint)
+        val border = gradientBorder(drawable, density, tint)
+        val gradient = gradientInfo(drawable, tint)
+        return when (drawable.shape) {
+            GradientDrawable.OVAL -> DrawnBackground(
+                fill = fill,
+                cornerRadiusPx = rect?.let { minOf(it.first, it.second) / 2f }?.takeIf { it > 0f },
+                border = border,
+                gradient = gradient,
+            )
+            GradientDrawable.LINE -> DrawnBackground(customDraw = border != null)
+            GradientDrawable.RING -> DrawnBackground(customDraw = fill != null || gradient != null || border != null)
+            else -> DrawnBackground(fill, gradientCornerRadius(drawable, rect), border, gradient)
+        }
+    }
+
+    /**
+     * The size (w, h px) of the rect a GradientDrawable draws its shape in (ensureValidRect): its
+     * bounds, or [viewW] × [viewH] before the View has set them (View.setBackgroundBounds, at
+     * draw), inset by half its stroke width on every side. Null when neither has a size.
+     */
+    internal fun drawnRectSize(drawable: GradientDrawable, viewW: Int = 0, viewH: Int = 0): Pair<Float, Float>? {
+        val b = drawable.bounds
+        val (w, h) = when {
+            !b.isEmpty -> Pair(b.width(), b.height())
+            viewW > 0 && viewH > 0 -> Pair(viewW, viewH)
+            else -> return null
+        }
+        val stroke = strokeWidthPx(drawable)
+        return Pair(w - stroke, h - stroke)
+    }
+
+    /** The width GradientDrawable strokes at: its stroke paint's, else its GradientState's; 0 with no stroke. */
+    private fun strokeWidthPx(drawable: GradientDrawable): Float {
+        val paint = try {
+            GradientDrawable::class.java.getDeclaredField("mStrokePaint").apply { isAccessible = true }.get(drawable)
+        } catch (_: Throwable) {
+            null
+        }
+        val width = (paint as? android.graphics.Paint)?.strokeWidth
+            ?: (gradientStateField(drawable.constantState, "mStrokeWidth") as? Int)?.toFloat()
+        return width?.takeIf { it.isFinite() && it > 0f } ?: 0f
+    }
+
+    private fun gradientStateField(state: Any?, name: String): Any? = try {
+        state?.javaClass?.getDeclaredField(name)?.apply { isAccessible = true }?.get(state)
+    } catch (_: Throwable) {
+        null
+    }
 
     private fun extractImageInfo(
         view: ImageView,
@@ -1259,13 +1411,6 @@ object ViewTreeWalker {
         return Triple(name, imgType, "images/$fileName")
     }
 
-    private fun extractCornerRadius(view: View): Float? = (view.background as? GradientDrawable)?.let { gradientCornerRadius(it) }
-
-    private fun extractBorder(
-        view: View,
-        density: Float,
-    ): BorderInfo? = (view.background as? GradientDrawable)?.let { gradientBorder(it, density) }
-
     // ---- GradientDrawable ----
     //
     // A GradientDrawable keeps what it draws on its GradientState (the drawable's ConstantState,
@@ -1288,93 +1433,163 @@ object ViewTreeWalker {
         list?.getColorForState(state, fallback)
 
     /**
-     * The solid color a GradientDrawable fills with: its color list (getColor()) at the
-     * drawable's current state. Null when it has none: a gradient fill, or no fill.
+     * The color a GradientDrawable fills with, as its draw fills: its solid color list
+     * (getColor()) at the drawable's current state, its alpha modulated by the drawable's own
+     * ([modulate]; draw restores the paint afterwards, so the list holds the unmodulated color),
+     * under the background [tint]. With no solid color and no gradient it fills nothing
+     * (updateLocalState sets the fill to 0), unless it is tinted: draw then fills with
+     * `mAlpha << 24` under the tint's filter (`if (colorFilter != null && st.mSolidColors ==
+     * null)`), so a stroke-only shape is filled with the tint. Null when nothing visible is
+     * filled ([visibleColor]): a gradient fill, no fill, or a fully transparent one.
      */
-    internal fun gradientFill(drawable: GradientDrawable): String? =
-        stateColor(drawable.color, drawable.state)?.let { colorToHex(it) }
+    internal fun gradientFill(drawable: GradientDrawable, tint: Tint? = null): String? {
+        val solid = stateColor(drawable.color, drawable.state)
+        val fill = when {
+            solid != null -> modulate(solid, drawable.alpha)
+            tint != null && drawable.colors == null -> drawable.alpha shl 24
+            else -> return null
+        }
+        return visibleColor(tinted(fill, tint))
+    }
 
     /**
-     * A GradientDrawable's top-left corner radius in px: the first of its per-corner radii
-     * (getCornerRadii(), top-left x first) when it has them, else its one radius
-     * (getCornerRadius()). Null when that corner isn't rounded.
+     * A GradientDrawable's top-left corner radius in px as its RECTANGLE draws it in [rect] (the
+     * drawn rect's w × h, [drawnRectSize]; null when unknown, and then unclamped). Per-corner radii
+     * (getCornerRadii()) win, scaled as Path.addRoundRect draws them ([radiiTopLeft]); else its one
+     * radius (getCornerRadius()), which draw clamps to half the rect's smaller side
+     * (`Math.min(st.mRadius, Math.min(mRect.width(), mRect.height()) * 0.5f)`). Null when that
+     * corner isn't rounded.
      */
-    internal fun gradientCornerRadius(drawable: GradientDrawable): Float? =
-        (drawable.cornerRadii?.firstOrNull() ?: drawable.cornerRadius).takeIf { it.isFinite() && it > 0f }
+    internal fun gradientCornerRadius(drawable: GradientDrawable, rect: Pair<Float, Float>? = drawnRectSize(drawable)): Float? {
+        val radii = drawable.cornerRadii
+        val radius = if (radii != null) {
+            radiiTopLeft(radii, rect)
+        } else {
+            val r = drawable.cornerRadius
+            if (rect == null) r else minOf(r, minOf(rect.first, rect.second) / 2f)
+        }
+        return radius?.takeIf { it.isFinite() && it > 0f }
+    }
+
+    /**
+     * The top-left x radius a radii array ([tlx, tly, trx, try, brx, bry, blx, bly]) is drawn
+     * with in [rect] (w, h; null: as declared), as Path.addRoundRect draws it through Skia's
+     * SkRRect::setRectRadii: a corner with either radius at or below 0 is square (both zeroed),
+     * and when the radii on any side overrun it every radius is scaled by one factor, the
+     * smallest side / (its two radii) (SkRRect::scaleRadii, the factor Compose's corners take,
+     * [ComposeVisuals.minRadius]). Null when that corner is square.
+     */
+    internal fun radiiTopLeft(radii: FloatArray, rect: Pair<Float, Float>?): Float? {
+        val r = FloatArray(8) { i -> radii.getOrElse(i) { 0f }.takeIf { it.isFinite() } ?: 0f }
+        for (corner in 0 until 4) {
+            if (r[2 * corner] <= 0f || r[2 * corner + 1] <= 0f) {
+                r[2 * corner] = 0f
+                r[2 * corner + 1] = 0f
+            }
+        }
+        if (r[0] <= 0f) return null
+        if (rect == null) return r[0]
+        val (w, h) = rect
+        var scale = 1f
+        scale = ComposeVisuals.minRadius(scale, r[0], r[2], w) // top: top-left x + top-right x
+        scale = ComposeVisuals.minRadius(scale, r[3], r[5], h) // right: top-right y + bottom-right y
+        scale = ComposeVisuals.minRadius(scale, r[4], r[6], w) // bottom: bottom-right x + bottom-left x
+        scale = ComposeVisuals.minRadius(scale, r[7], r[1], h) // left: bottom-left y + top-left y
+        return r[0] * scale
+    }
 
     /**
      * The stroke a GradientDrawable draws, as a border: what its stroke paint holds
      * ([paintStroke]), or, when that paint can't be read, what its GradientState holds
-     * ([stateStroke]). Null when it draws no stroke.
+     * ([stateStroke]), its alpha modulated by the drawable's and under the background [tint].
+     * Null when it draws no stroke.
      */
-    internal fun gradientBorder(drawable: GradientDrawable, density: Float): BorderInfo? {
+    internal fun gradientBorder(drawable: GradientDrawable, density: Float, tint: Tint? = null): BorderInfo? {
         val paint = try {
             GradientDrawable::class.java.getDeclaredField("mStrokePaint").apply { isAccessible = true }.get(drawable)
         } catch (_: Throwable) {
-            return stateStroke(drawable.constantState, drawable.state, density)
+            return stateStroke(drawable.constantState, drawable.state, density, drawable.alpha, tint)
         }
         // No stroke paint: setStroke was never called, and nothing is stroked.
-        return (paint as? android.graphics.Paint)?.let { paintStroke(it, density) }
+        return (paint as? android.graphics.Paint)?.let { paintStroke(it, density, drawable.alpha, tint) }
     }
 
     /**
      * A GradientDrawable's stroke paint as a border. GradientDrawable sets that paint's width to
      * the stroke width and its color to the stroke's color list resolved at the drawable's
      * current state (setStroke, then onStateChange on every state change), and strokes with it
-     * only when its width is above 0 (draw: `haveStroke = ... mStrokePaint.getStrokeWidth() > 0`).
+     * only when its width is above 0 (draw: `haveStroke = ... mStrokePaint.getStrokeWidth() > 0`),
+     * at its alpha modulated by the drawable's [drawableAlpha] and under its [tint].
      */
-    internal fun paintStroke(paint: android.graphics.Paint, density: Float): BorderInfo? =
-        strokeBorder(paint.strokeWidth, paint.color, density)
+    internal fun paintStroke(paint: android.graphics.Paint, density: Float, drawableAlpha: Int = 255, tint: Tint? = null): BorderInfo? =
+        strokeBorder(paint.strokeWidth, tinted(modulate(paint.color, drawableAlpha), tint), density)
 
     /**
      * A stroke read from a GradientDrawable's GradientState ([state], the drawable's
      * ConstantState): mStrokeWidth (-1 for none) and mStrokeColors resolved at the drawable's
-     * [drawableState], as GradientDrawable resolves them. Null when either can't be read.
+     * [drawableState] (no list strokes Color.TRANSPARENT), as GradientDrawable resolves them,
+     * modulated by [drawableAlpha] and under [tint] as [paintStroke]. Null when the width can't
+     * be read.
      */
-    internal fun stateStroke(state: Any?, drawableState: IntArray?, density: Float): BorderInfo? {
+    internal fun stateStroke(
+        state: Any?,
+        drawableState: IntArray?,
+        density: Float,
+        drawableAlpha: Int = 255,
+        tint: Tint? = null,
+    ): BorderInfo? {
         if (state == null) return null
-        fun read(name: String): Any? = try {
-            state.javaClass.getDeclaredField(name).apply { isAccessible = true }.get(state)
-        } catch (_: Throwable) {
-            null
-        }
-        val width = read("mStrokeWidth") as? Int ?: return null
-        val colors = read("mStrokeColors") as? android.content.res.ColorStateList
-        return strokeBorder(width.toFloat(), stateColor(colors, drawableState), density)
+        val width = gradientStateField(state, "mStrokeWidth") as? Int ?: return null
+        val colors = gradientStateField(state, "mStrokeColors") as? android.content.res.ColorStateList
+        val color = stateColor(colors, drawableState) ?: android.graphics.Color.TRANSPARENT
+        return strokeBorder(width.toFloat(), tinted(modulate(color, drawableAlpha), tint), density)
     }
 
     /**
      * An ImageView's tint, resolved as its drawable resolves it at the view's current state
      * (Drawable.updateTintFilter: `getColorForState(getState(), Color.TRANSPARENT)`; ImageView
-     * keeps a stateful drawable's state in step with its own). Null with no tint.
+     * keeps a stateful drawable's state in step with its own), as its hex ([visibleColor]). Null
+     * with no tint, or a fully transparent one.
      */
-    internal fun imageTint(view: ImageView): String? =
-        stateColor(view.imageTintList, view.drawableState, android.graphics.Color.TRANSPARENT)?.let { colorToHex(it) }
+    internal fun imageTint(view: ImageView): String? = imageTintColor(view)?.let { visibleColor(it) }
+
+    private fun imageTintColor(view: ImageView): Int? =
+        stateColor(view.imageTintList, view.drawableState, android.graphics.Color.TRANSPARENT)
+
+    /**
+     * Whether an ImageView's tint leaves nothing of its image on screen: a fully transparent tint
+     * in the default mode (imageTintBlendMode unset: the drawable's SRC_IN) or another mode that
+     * replaces the image's pixels ([ComposeVisuals.tintHides], the rule Compose painters go
+     * through too).
+     */
+    internal fun imageTintHides(view: ImageView): Boolean {
+        val tint = imageTintColor(view) ?: return false
+        val mode = if (Build.VERSION.SDK_INT >= 29) view.imageTintBlendMode?.name else view.imageTintMode?.name
+        return ComposeVisuals.tintHides(tint, mode)
+    }
 
     /**
      * A GradientDrawable stroke as a border, or null when it draws nothing: no width, or a stroke
      * color with zero alpha. GradientDrawable.draw strokes only when the stroke paint's alpha is
      * above 0 (`haveStroke = currStrokeAlpha > 0 && ...`), and setStroke with no color list
-     * strokes Color.TRANSPARENT, so a missing color is a transparent one. The alpha check is the
-     * one Compose borders go through ([ComposeVisuals.argbHex]); the hex is the same as colorToHex's.
+     * strokes Color.TRANSPARENT, so a missing color is a transparent one. The color goes through
+     * the one visible-color rule ([visibleColor]).
      */
     internal fun strokeBorder(strokeWidthPx: Float, strokeColor: Int?, density: Float): BorderInfo? {
         if (!strokeWidthPx.isFinite() || strokeWidthPx <= 0f || strokeColor == null) return null
-        val color = ComposeVisuals.argbHex(strokeColor, keepTransparent = false) ?: return null
+        val color = visibleColor(strokeColor) ?: return null
         return BorderInfo(width = strokeWidthPx / density, color = color)
     }
 
-    private fun extractGradient(view: View): GradientInfo? {
-        val bg = view.background
-        val drawable =
-            when (bg) {
-                is GradientDrawable -> bg
-                is RippleDrawable -> if (bg.numberOfLayers > 0) bg.getDrawable(0) as? GradientDrawable else null
-                else -> null
-            } ?: return null
-
-        if (Build.VERSION.SDK_INT < 24) return null
-        val stops = gradientStops(drawable.colors) ?: return null
+    /**
+     * A GradientDrawable's gradient: its stops (getColors()) as its fill paint draws them, each
+     * with its alpha modulated by the drawable's (draw sets the paint to opaque black under the
+     * shader, then modulates its alpha) and under the background [tint]. Null with no gradient
+     * to report ([gradientStops]).
+     */
+    internal fun gradientInfo(drawable: GradientDrawable, tint: Tint? = null): GradientInfo? {
+        val colors = drawable.colors?.map { tinted(modulate(it, drawable.alpha), tint) }?.toIntArray()
+        val stops = gradientStops(colors) ?: return null
 
         val type =
             when (drawable.gradientType) {
@@ -1406,7 +1621,7 @@ object ViewTreeWalker {
      */
     internal fun gradientStops(colors: IntArray?): List<String>? {
         if (colors == null || colors.size < 2) return null
-        return colors.map { colorToHex(it) }.takeIf { ComposeVisuals.gradientVisible(it) }
+        return colors.map { ComposeVisuals.argbToHex(it) }.takeIf { ComposeVisuals.gradientVisible(it) }
     }
 
     private val externalRenderPatterns =
@@ -1461,18 +1676,6 @@ object ViewTreeWalker {
             view.resources.getResourceEntryName(view.id)
         } catch (_: Exception) {
             null
-        }
-    }
-
-    private fun colorToHex(color: Int): String {
-        val a = (color shr 24) and 0xFF
-        val r = (color shr 16) and 0xFF
-        val g = (color shr 8) and 0xFF
-        val b = color and 0xFF
-        return if (a == 255) {
-            String.format("#%02X%02X%02X", r, g, b)
-        } else {
-            String.format("#%02X%02X%02X%02X", a, r, g, b)
         }
     }
 
