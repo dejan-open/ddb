@@ -257,17 +257,52 @@ class ComposeVisualsTest {
         assertNull(ComposeVisuals.cornerSizePx("DpCornerSize", null, 2f, null))
     }
 
+    private fun corners(ts: Float?, te: Float?, be: Float?, bs: Float?, size: Pair<Int, Int>?): List<Float> =
+        ComposeVisuals.drawnCornersPx(ts, te, be, bs, size).toList()
+
+    private fun assertCorners(expected: List<Float>, actual: List<Float>) {
+        assertEquals(expected.size, actual.size)
+        expected.indices.forEach { assertEquals("corner $it", expected[it], actual[it], 1e-3f) }
+    }
+
     @Test
     fun corners_too_large_for_the_shape_are_scaled_down_as_compose_draws_them() {
         // RoundedCornerShape(100.dp) at density 2 on a 96x48 px button: 200 + 200 px > 48 px,
-        // so both start corners scale down to 24 px.
-        assertEquals(24f, ComposeVisuals.drawnCornerPx(200f, 200f, Pair(96, 48)), 1e-4f)
+        // so every corner scales down to 24 px.
+        assertCorners(listOf(24f, 24f, 24f, 24f), corners(200f, 200f, 200f, 200f, Pair(96, 48)))
         // Corners that fit, and a 50% pill whose corners add up to exactly the smaller side.
-        assertEquals(16f, ComposeVisuals.drawnCornerPx(16f, 16f, Pair(96, 48)), 0f)
-        assertEquals(24f, ComposeVisuals.drawnCornerPx(24f, 24f, Pair(96, 48)), 0f)
-        // No size: nothing to scale against. An unknown bottom corner counts as 0.
-        assertEquals(200f, ComposeVisuals.drawnCornerPx(200f, 200f, null), 0f)
-        assertEquals(48f, ComposeVisuals.drawnCornerPx(100f, null, Pair(96, 48)), 1e-4f)
+        assertCorners(listOf(16f, 16f, 16f, 16f), corners(16f, 16f, 16f, 16f, Pair(96, 48)))
+        assertCorners(listOf(24f, 24f, 24f, 24f), corners(24f, 24f, 24f, 24f, Pair(96, 48)))
+        // No size: nothing to scale against. An unknown corner counts as 0.
+        assertCorners(listOf(200f, 200f, 200f, 200f), corners(200f, 200f, 200f, 200f, null))
+        assertCorners(listOf(48f, 0f, 0f, 0f), corners(100f, null, null, null, Pair(96, 48)))
+    }
+
+    @Test
+    fun overlapping_corners_scale_by_one_factor_over_all_four_sides() {
+        // RoundedCornerShape(topStart = 80px, topEnd = 80px) on a 100 px square: the start side
+        // (80 + 0) fits, but the top side's 160 px of radii do not fit its 100 px, so both top
+        // corners draw at 50 px, as RoundRect.scaledRadiiRect and Skia's SkRRect scale them.
+        assertCorners(listOf(50f, 50f, 0f, 0f), corners(80f, 80f, 0f, 0f, Pair(100, 100)))
+        // The same corners at the bottom.
+        assertCorners(listOf(0f, 0f, 50f, 50f), corners(0f, 0f, 80f, 80f, Pair(100, 100)))
+        // One factor for every corner: on a 100x80 px box the bottom side (60 + 60 > 100) sets
+        // it to 100/120, and the top-start corner shrinks with it even though the top fits.
+        assertCorners(listOf(10f * 100f / 120f, 10f * 100f / 120f, 50f, 50f), corners(10f, 10f, 60f, 60f, Pair(100, 80)))
+        // The top side's 90 + 60 on 100 px sets 2/3 for all four, so the bottom-end corner draws
+        // at 20 px though both of its own sides fit.
+        assertCorners(listOf(60f, 40f, 20f, 0f), corners(90f, 60f, 30f, 0f, Pair(100, 100)))
+    }
+
+    @Test
+    fun the_vertical_pairs_scale_to_the_smaller_side_before_the_four_sides_do() {
+        // CornerBasedShape.createOutline scales the start pair against the smaller side (50),
+        // not the 100 px side it sits on, so 50 + 50 px corners on a 50x100 box draw at 25 px.
+        assertCorners(listOf(25f, 0f, 0f, 25f), corners(50f, 0f, 0f, 50f, Pair(50, 100)))
+        // Then the four sides: 80 px corners all round on a 100 px square become a circle.
+        assertCorners(listOf(50f, 50f, 50f, 50f), corners(80f, 80f, 80f, 80f, Pair(100, 100)))
+        // Corners that already fit every side are left alone.
+        assertCorners(listOf(8f, 12f, 16f, 20f), corners(8f, 12f, 16f, 20f, Pair(100, 100)))
     }
 
     @Test

@@ -156,6 +156,22 @@ class ComposeDrawChainTest {
     }
 
     @Test
+    fun the_reported_corner_is_scaled_against_every_side_it_shares() {
+        val none = DpCornerSize(0f)
+        // RoundedCornerShape(topStart = 80px, topEnd = 80px) on a 100 px square: the start side
+        // fits, the top side does not, and Compose draws both top corners at 50 px.
+        val topHeavy = RoundedCornerShape(DpCornerSize(80f), DpCornerSize(80f), none, none)
+        val shadow = readSized(null, 1f, SizedInfo(ShadowGraphicsLayerElement(4f, topHeavy), measured(100, 100)))
+        assertEquals(50f, shadow.cornerRadius!!, 1e-4f)
+        val border = readSized(null, 1f, SizedInfo(BorderModifierNodeElement(1f, ShaderBrush(), topHeavy), measured(100, 100)))
+        assertEquals(50f, border.cornerRadius!!, 1e-4f)
+        // A bottom side too short for its corners shrinks the top-start corner by the same factor.
+        val bottomHeavy = RoundedCornerShape(DpCornerSize(10f), DpCornerSize(10f), DpCornerSize(60f), DpCornerSize(60f))
+        val card = readSized(null, 1f, SizedInfo(ShadowGraphicsLayerElement(4f, bottomHeavy), measured(100, 80)))
+        assertEquals(10f * 100f / 120f, card.cornerRadius!!, 1e-4f)
+    }
+
+    @Test
     fun cut_corners_are_not_a_corner_radius() {
         val cut = CutCornerShape(DpCornerSize(8f), DpCornerSize(8f))
         val shadow = readSized(null, 1f, SizedInfo(ShadowGraphicsLayerElement(4f, cut), measured(100, 100)))

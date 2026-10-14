@@ -874,16 +874,67 @@ internal object ComposeVisuals {
     }
 
     /**
-     * The top-start corner as it draws, in px. CornerBasedShape.createOutline scales a side's two
-     * corners down together when they add up to more than the shape's smaller side, so a
-     * RoundedCornerShape(100.dp) on a 48dp-high button draws 24dp corners. An unknown
-     * [bottomStart] counts as 0.
+     * The four corners of a rounded shape as Compose draws them at [size] (px, width to height),
+     * in CornerBasedShape's order: top-start, top-end, bottom-end, bottom-start. An unknown
+     * corner (null) counts as 0. Two steps, both on the path every rounded shape draws through:
+     *
+     * 1. CornerBasedShape.createOutline (compose foundation, CornerBasedShape.kt) scales the start
+     *    pair (topStart + bottomStart) and the end pair (topEnd + bottomEnd), each on its own,
+     *    down to the shape's smaller side, so a RoundedCornerShape(100.dp) on a 48dp-high button
+     *    draws 24dp corners.
+     * 2. RoundedCornerShape.createOutline puts those corners in a RoundRect, which draws through
+     *    AndroidPath.addRoundRect into android.graphics.Path.addRoundRect. There Skia's
+     *    SkRRect::scaleRadii scales every radius by ONE factor: the smallest side / (the two
+     *    radii on that side) over all four sides, the CSS rule for overlapping corners (CSS
+     *    Backgrounds 3, 5.5 "Overlapping Curves"). Compose's own RoundRect.scaledRadiiRect
+     *    (compose ui-geometry, RoundRect.kt) takes the same factor, in the same side order, for
+     *    hit testing. After step 1 the start and end sides fit, so here the top and bottom sides
+     *    set it: RoundedCornerShape(topStart = 80px, topEnd = 80px) on a 100px square draws both
+     *    corners at 50px, and a bottom side too short for its corners shrinks the top ones too.
+     *
+     * With no size there is nothing to scale against, and the corners come back as declared.
      */
-    fun drawnCornerPx(topStart: Float, bottomStart: Float?, size: Pair<Int, Int>?): Float {
-        if (size == null) return topStart
-        val minSide = minOf(size.first, size.second).toFloat()
-        val sum = topStart + (bottomStart ?: 0f)
-        return if (sum > minSide && sum > 0f) topStart * (minSide / sum) else topStart
+    fun drawnCornersPx(
+        topStart: Float?,
+        topEnd: Float?,
+        bottomEnd: Float?,
+        bottomStart: Float?,
+        size: Pair<Int, Int>?,
+    ): FloatArray {
+        var ts = topStart ?: 0f
+        var te = topEnd ?: 0f
+        var be = bottomEnd ?: 0f
+        var bs = bottomStart ?: 0f
+        if (size == null) return floatArrayOf(ts, te, be, bs)
+        val width = size.first.toFloat()
+        val height = size.second.toFloat()
+        // Step 1, CornerBasedShape.createOutline: each pair on a vertical side, against the
+        // smaller side of the shape.
+        val minDimension = minOf(width, height)
+        if (ts + bs > minDimension) {
+            val scale = minDimension / (ts + bs)
+            ts *= scale
+            bs *= scale
+        }
+        if (te + be > minDimension) {
+            val scale = minDimension / (te + be)
+            te *= scale
+            be *= scale
+        }
+        // Step 2, RoundRect.scaledRadiiRect: one factor over the four sides. Which corner sits
+        // left or right depends on the layout direction, but the four sums do not.
+        var scale = 1f
+        scale = minRadius(scale, bs, ts, height)
+        scale = minRadius(scale, ts, te, width)
+        scale = minRadius(scale, te, be, height)
+        scale = minRadius(scale, be, bs, width)
+        return floatArrayOf(ts * scale, te * scale, be * scale, bs * scale)
+    }
+
+    /** RoundRect.minRadius: the smaller of [min] and what fits [radius1] + [radius2] in [limit]. */
+    private fun minRadius(min: Float, radius1: Float, radius2: Float, limit: Float): Float {
+        val sum = radius1 + radius2
+        return if (sum > limit && sum != 0f) minOf(min, limit / sum) else min
     }
 
     /**
@@ -901,7 +952,8 @@ internal object ComposeVisuals {
             return cornerSizePx(kind, value, density, size)
         }
         val topStart = cornerPx("topStart") ?: return null
-        return (drawnCornerPx(topStart, cornerPx("bottomStart"), size) / density).takeIf { it.isFinite() && it > 0f }
+        val drawn = drawnCornersPx(topStart, cornerPx("topEnd"), cornerPx("bottomEnd"), cornerPx("bottomStart"), size)
+        return (drawn[0] / density).takeIf { it.isFinite() && it > 0f }
     }
 
     private fun painterType(painter: Any?): String? {
