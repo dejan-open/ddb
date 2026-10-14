@@ -101,6 +101,13 @@ class ComposeVisualsTest {
     }
 
     @Test
+    fun all_transparent_gradient_is_invisible_but_a_fade_is_not() {
+        assertEquals(false, ComposeVisuals.gradientVisible(listOf("#00000000", "#00FF0000")))
+        assertEquals(true, ComposeVisuals.gradientVisible(listOf("#FF0000", "#00000000")))
+        assertEquals(true, ComposeVisuals.gradientVisible(listOf("#80FF0000", "#00000000")))
+    }
+
+    @Test
     fun size_packs_like_an_offset() {
         assertEquals(Pair(1080f, 2400f), ComposeVisuals.unpackOffset(ComposeVisuals.packSize(1080f, 2400f)))
         assertEquals(pack(12.5f, 3f), ComposeVisuals.packSize(12.5f, 3f))

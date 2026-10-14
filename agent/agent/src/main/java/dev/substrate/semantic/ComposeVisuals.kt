@@ -79,13 +79,17 @@ internal object ComposeVisuals {
                     val brushAlpha = (field(element, "alpha") as? Float)?.takeIf { it.isFinite() } ?: 1f
                     val brush = field(element, "brush")
                     val color = colorHex(element, (field(element, "color") as? Long) ?: UNSPECIFIED_COLOR, alpha = layerAlpha())
-                    val grad = if (brushAlpha > 0f) gradient(brush, element, brushAlpha * layerAlpha()) else null
+                    val decoded = if (brushAlpha > 0f) gradient(brush, element, brushAlpha * layerAlpha()) else null
+                    // A gradient keeps transparent stops for its fade, but one whose every stop
+                    // is transparent draws nothing.
+                    val grad = decoded?.takeIf { gradientVisible(it.colors) }
                     val solid = color ?: if (brushAlpha > 0f) solidBrushHex(brush, element, brushAlpha * layerAlpha()) else null
-                    // Nothing drawn: a transparent color with no brush, a brush at alpha 0, or a
-                    // solid brush with no color left. Any other brush (a gradient, a ShaderBrush)
-                    // still draws, even when its colors could not be read.
+                    // Nothing drawn: a transparent color with no brush, a brush at alpha 0, a
+                    // solid brush with no color left, or an all-transparent gradient. Any other
+                    // brush (a ShaderBrush) still draws, even when its colors could not be read.
                     val brushDrawsNothing = brush == null || brushAlpha <= 0f ||
-                        (brush.javaClass.simpleName == "SolidColor" && solid == null)
+                        (brush.javaClass.simpleName == "SolidColor" && solid == null) ||
+                        (decoded != null && grad == null)
                     if (color == null && brushDrawsNothing) continue
                     seenDraw = true
                     // A brush that draws but whose colors can't be decoded (a ShaderBrush, or a
@@ -123,8 +127,20 @@ internal object ComposeVisuals {
                     // Image(alpha = 0f) / paint(alpha = 0f) draws nothing.
                     val painterAlpha = (field(element, "alpha") as? Float)?.takeIf { it.isFinite() } ?: 1f
                     if (painterAlpha <= 0f) continue
-                    seenDraw = true
                     val painter = field(element, "painter")
+                    if (painter?.javaClass?.simpleName == "ColorPainter") {
+                        // ColorPainter fills its bounds with one color: that is a background, not
+                        // an image, and a transparent one draws nothing (no padding boundary).
+                        val fill = (field(painter, "color") as? Long)?.let { colorHex(element, it, alpha = painterAlpha * layerAlpha()) }
+                            ?: continue
+                        seenDraw = true
+                        v = v.copy(
+                            background = v.background ?: fill,
+                            drawBounds = firstDrawBounds(info),
+                        )
+                        continue
+                    }
+                    seenDraw = true
                     val type = painterType(painter)
                     if (type != null && v.imageType == null) {
                         v = v.copy(
@@ -132,15 +148,6 @@ internal object ComposeVisuals {
                             imageTint = colorFilterHex(field(element, "colorFilter"), element, painterAlpha * layerAlpha()),
                             drawBounds = firstDrawBounds(info),
                         )
-                    } else if (painter?.javaClass?.simpleName == "ColorPainter" && v.background == null) {
-                        // ColorPainter fills its bounds with one color: that is a background, not an image.
-                        val fill = (field(painter, "color") as? Long)?.let { colorHex(element, it, alpha = painterAlpha * layerAlpha()) }
-                        if (fill != null) {
-                            v = v.copy(
-                                background = fill,
-                                drawBounds = firstDrawBounds(info),
-                            )
-                        }
                     }
                 }
                 "ShadowGraphicsLayerElement" -> {
@@ -164,7 +171,7 @@ internal object ComposeVisuals {
                             shape = field(element, "shape"),
                         )
                     } else {
-                        blockLayer(element, density, ownBounds(info) ?: nodeBounds)
+                        blockLayer(element, density, fontScale, ownBounds(info) ?: nodeBounds)
                     } ?: continue
                     val alpha = layer.alpha?.takeIf { it.isFinite() }?.coerceIn(0f, 1f)
                     if (alpha != null && alpha < 1f) ownAlpha *= alpha
@@ -243,6 +250,10 @@ internal object ComposeVisuals {
             java.lang.Float.intBitsToFloat((packed ushr 32).toInt()),
             java.lang.Float.intBitsToFloat((packed and 0xFFFFFFFFL).toInt()),
         )
+
+    /** False when every stop is fully transparent (#00RRGGBB): such a gradient draws nothing. */
+    fun gradientVisible(colors: List<String>): Boolean =
+        colors.any { !(it.length == 9 && it.startsWith("#00")) }
 
     /** Compose packs a Size like an Offset: width in the high 32 bits, height in the low. */
     fun packSize(width: Float, height: Float): Long =
@@ -420,7 +431,7 @@ internal object ComposeVisuals {
      * fresh ReusableGraphicsLayerScope with the screen density (so `8.dp.toPx()` resolves as
      * it does on screen). Null when any of that is unavailable in this Compose release.
      */
-    private fun blockLayer(element: Any, density: Float, layerBounds: Bounds?): LayerProps? {
+    private fun blockLayer(element: Any, density: Float, fontScale: Float, layerBounds: Bounds?): LayerProps? {
         val block = (field(element, "block") ?: field(element, "layerBlock")) as? Function1<*, *> ?: return null
         return try {
             val loader = element.javaClass.classLoader
@@ -429,7 +440,7 @@ internal object ComposeVisuals {
             val densityKt = Class.forName("androidx.compose.ui.unit.DensityKt", false, loader)
             val densityObj = densityKt.methods
                 .firstOrNull { it.name == "Density" && it.parameterCount == 2 }
-                ?.invoke(null, density, 1f)
+                ?.invoke(null, density, fontScale)
             if (densityObj != null) {
                 scopeClass.methods
                     .firstOrNull { it.name.startsWith("setGraphicsDensity") && it.parameterCount == 1 }
