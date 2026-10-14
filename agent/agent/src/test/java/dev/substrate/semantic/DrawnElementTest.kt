@@ -73,6 +73,18 @@ class DrawnElementTest {
     }
 
     @Test
+    fun a_view_gradient_whose_every_stop_is_transparent_is_no_gradient() {
+        // A GradientDrawable fading between two transparent colors draws nothing: extractGradient
+        // reports no gradient, so none is serialized and it doesn't count toward drawsSomething.
+        assertEquals(null, ViewTreeWalker.gradientStops(intArrayOf(0x00FF0000, 0x000000FF)))
+        // A transparent stop among visible ones still shapes the fade and is kept.
+        assertEquals(listOf("#00FF0000", "#0000FF"), ViewTreeWalker.gradientStops(intArrayOf(0x00FF0000, 0xFF0000FF.toInt())))
+        // Fewer than two stops, or none read, is no gradient.
+        assertEquals(null, ViewTreeWalker.gradientStops(intArrayOf(0xFF0000FF.toInt())))
+        assertEquals(null, ViewTreeWalker.gradientStops(null))
+    }
+
+    @Test
     fun image_block_writes_type_only_when_the_format_is_known() {
         assertEquals(emptyList<String>(), SemanticServer.imageYaml(null, null))
         assertEquals(emptyList<String>(), SemanticServer.imageYaml(null, "raster"))

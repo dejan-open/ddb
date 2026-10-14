@@ -1,5 +1,6 @@
 package dev.substrate.semantic
 
+import androidx.compose.ui.graphics.drawscope.ContentDrawScope
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNull
@@ -13,7 +14,7 @@ import org.junit.Test
 class ComposeDrawChainTest {
 
     class DrawBehindElement
-    class DrawWithContentElement
+    class DrawWithContentElement(private val onDraw: (ContentDrawScope.() -> Unit)? = null)
     class DrawWithCacheElement
     class GraphicsLayerElement(private val alpha: Float)
     class PaddingElement(
@@ -126,6 +127,107 @@ class ComposeDrawChainTest {
             // With nothing drawn, every padding is the node's own.
             assertNull(read(GraphicsLayerElement(0f), pad(8f), element).margin)
         }
+    }
+
+    private fun border() = BorderModifierNodeElement(1f, ShaderBrush(), Any())
+
+    @Test
+    fun a_drawWithContent_that_skips_drawContent_hides_what_follows_it() {
+        // drawWithContent { drawRect(…) }: the block's own draw replaces everything after it in
+        // the chain (here a border; on a Text, the text) and the node's children.
+        val replaced = read(DrawWithContentElement { drawRect(0L) }, border())
+        assertTrue(replaced.contentSkipped)
+        assertTrue(replaced.hidesContent(1f))
+        assertNull(replaced.border)
+        assertTrue(replaced.customDraw)
+        assertTrue(replaced.draws)
+        // drawWithContent {}: nothing at all is on screen.
+        val empty = read(DrawWithContentElement {}, border())
+        assertTrue(empty.hidesContent(1f))
+        assertFalse(empty.customDraw)
+        assertFalse(empty.draws)
+        // A shadow after it is not drawn either.
+        assertNull(read(DrawWithContentElement {}, ShadowGraphicsLayerElement(4f, Any())).elevation)
+    }
+
+    @Test
+    fun what_comes_before_a_skipped_drawContent_still_draws() {
+        val v = read(border(), DrawWithContentElement {})
+        assertEquals(1f, v.border!!.width, 0f)
+        assertTrue(v.draws)
+        assertTrue(v.hidesContent(1f))
+    }
+
+    @Test
+    fun a_drawWithContent_that_calls_drawContent_keeps_what_follows_it() {
+        val v = read(DrawWithContentElement { drawRect(0L); drawContent() }, border())
+        assertFalse(v.contentSkipped)
+        assertFalse(v.hidesContent(1f))
+        assertEquals(1f, v.border!!.width, 0f)
+        assertTrue(v.customDraw)
+    }
+
+    @Test
+    fun a_content_block_that_draws_nothing_sets_no_padding_boundary() {
+        // padding(8).drawWithContent {}.padding(4): no draw, so all 12 are the node's own.
+        val v = read(pad(8f), DrawWithContentElement {}, pad(4f))
+        assertNull(v.margin)
+        assertEquals(PaddingInfo(12, 12, 12, 12), v.padding)
+    }
+
+    @Test
+    fun a_skipped_drawContent_hides_the_subtree_like_an_alpha_zero_layer() {
+        assertFalse(ComposeDrawInfo().hidesContent(1f))
+        assertTrue(ComposeDrawInfo().hidesContent(0f))
+        assertTrue(ComposeDrawInfo(contentSkipped = true).hidesContent(1f))
+    }
+
+    // A drawWithCache node as Compose keeps it: the LayoutNode's NodeChain from its head through
+    // each node's child, and the content block its CacheDrawScope last built (a DrawResult).
+    open class ChainNode {
+        var child: Any? = null
+    }
+    class TailModifierNode : ChainNode()
+    class CacheDrawModifierNodeImpl(private val cacheDrawScope: Any) : ChainNode()
+    class CacheDrawScope(private val drawResult: Any?)
+    class DrawResult(private val block: ContentDrawScope.() -> Unit)
+    class NodeChain(private val head: Any)
+
+    class ChainedNode(private val nodes: Any, private vararg val elements: Any) {
+        fun getModifierInfo(): List<Any> = elements.map { Info(it) }
+    }
+
+    private fun cacheNode(block: (ContentDrawScope.() -> Unit)?) =
+        CacheDrawModifierNodeImpl(CacheDrawScope(block?.let { DrawResult(it) }))
+
+    private fun chain(vararg nodes: ChainNode): NodeChain {
+        val all = nodes.toList() + TailModifierNode()
+        for (i in 0 until all.size - 1) all[i].child = all[i + 1]
+        return NodeChain(all.first())
+    }
+
+    private fun readChained(chain: NodeChain, vararg elements: Any): ComposeDrawInfo =
+        ComposeVisuals.read(ChainedNode(chain, *elements), density = 1f, fontScale = 1f, resources = null, nodeBounds = null)
+
+    @Test
+    fun a_drawWithCache_content_block_is_read_from_its_live_node() {
+        // onDrawWithContent { drawRect(…) }, after an unrelated node: the content is skipped.
+        val skips = readChained(chain(ChainNode(), cacheNode { drawRect(0L) }), DrawWithCacheElement(), border())
+        assertTrue(skips.contentSkipped)
+        assertNull(skips.border)
+        assertTrue(skips.customDraw)
+        // onDrawBehind's block draws, then calls drawContent().
+        val behind = readChained(chain(cacheNode { drawRect(0L); drawContent() }), DrawWithCacheElement(), border())
+        assertFalse(behind.contentSkipped)
+        assertEquals(1f, behind.border!!.width, 0f)
+        // A node that has not drawn yet (no DrawResult), or a chain whose cache nodes don't line
+        // up with the elements, is unknown: the content is kept, as before.
+        val unbuilt = readChained(chain(cacheNode(null)), DrawWithCacheElement(), border())
+        assertFalse(unbuilt.contentSkipped)
+        assertTrue(unbuilt.customDraw)
+        val misaligned = readChained(chain(cacheNode {}), DrawWithCacheElement(), DrawWithCacheElement(), border())
+        assertFalse(misaligned.contentSkipped)
+        assertEquals(1f, misaligned.border!!.width, 0f)
     }
 
     private fun readSized(nodeBounds: Bounds?, density: Float, vararg infos: SizedInfo): ComposeDrawInfo =

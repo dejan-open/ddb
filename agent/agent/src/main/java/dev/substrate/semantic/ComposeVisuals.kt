@@ -33,11 +33,23 @@ internal data class ComposeDrawInfo(
     val customDraw: Boolean = false,
     /** Bounds of the first drawing modifier, when it differs from the node's (an outer padding). */
     val drawBounds: Bounds? = null,
+    /**
+     * A drawWithContent block (or a drawWithCache onDrawWithContent block) was seen to return
+     * without calling drawContent(): the modifiers after it and the node's children are not drawn.
+     */
+    val contentSkipped: Boolean = false,
 ) {
     val draws: Boolean
         // A shadow is drawn on its own, with no background or content under it.
         get() = background != null || gradient != null || border != null || imageType != null || elevation != null ||
             customDraw
+
+    /**
+     * Whether the node's content and subtree are off screen when drawn at [subtreeAlpha] (every
+     * ancestor's and the node's own layer alpha): under a layer at alpha 0, or after a skipped
+     * drawContent(). What the node draws before that point is still on screen.
+     */
+    fun hidesContent(subtreeAlpha: Float): Boolean = subtreeAlpha <= 0f || contentSkipped
 }
 
 internal object ComposeVisuals {
@@ -57,11 +69,209 @@ internal object ComposeVisuals {
      * padding/margin boundary and is hidden by an alpha-0 layer before it, like a background.
      * A lambda that only calls drawContent() costs at most a plain container in the capture;
      * dropping a node that does draw would lose it entirely.
+     *
+     * drawWithContent and drawWithCache's onDrawWithContent also decide whether the content
+     * under them is drawn at all, which [probeContentDraw] observes: a block seen to return
+     * without calling drawContent() hides the rest of the chain and the children, and one that
+     * also drew nothing of its own is no draw. drawBehind always draws the content after its
+     * lambda (DrawBackgroundModifier.draw: onDraw(), then drawContent()).
      */
     private val CUSTOM_DRAW_ELEMENTS = setOf("DrawBehindElement", "DrawWithContentElement", "DrawWithCacheElement")
 
     /** Whether a modifier, known by its element class name, is a custom draw. */
     fun isCustomDraw(elementName: String): Boolean = elementName in CUSTOM_DRAW_ELEMENTS
+
+    /** What a content block (a `ContentDrawScope.() -> Unit`) does with the content under it. */
+    enum class ContentDraw {
+        /** It called drawContent(): the rest of the chain and the children are drawn. */
+        CONTENT,
+
+        /** It returned without calling drawContent(), after a draw call of its own. */
+        OWN_ONLY,
+
+        /** It returned without calling drawContent() or drawing anything: nothing is on screen. */
+        NOTHING,
+
+        /** It could not be run, or it threw before calling drawContent(). */
+        UNKNOWN,
+    }
+
+    private const val CONTENT_DRAW_SCOPE = "androidx.compose.ui.graphics.drawscope.ContentDrawScope"
+
+    /** Ends a probed block at its drawContent() call: the answer is known, and nothing after it runs. */
+    private class ContentDrawn : RuntimeException() {
+        override fun fillInStackTrace(): Throwable = this
+    }
+
+    /**
+     * Runs a content block once on a recording ContentDrawScope and reports whether it draws
+     * the content under it. The block decides that itself: Compose's DrawWithContentModifier
+     * (DrawModifier.kt) draws by running `onDraw()` and nothing else, drawWithCache's node runs
+     * its cached DrawResult block the same way, and only ContentDrawScope.drawContent() draws
+     * the rest of the chain and the children (LayoutNodeDrawScope.drawContent: the next draw
+     * node, else the wrapped coordinator). ContentDrawScope's own contract: "If drawContent is
+     * not called, the contents of the layout will not be drawn."
+     *
+     * The scope records instead of drawing. Draw calls are dropped and noted. Size (the
+     * modifier's measured size, [sizePx]), density, font scale and layout direction are the
+     * node's. DrawScope's GraphicsLayer.record runs its block on this scope and never touches
+     * the layer. The run ends at the first drawContent(), so nothing after it executes. A block
+     * that throws first, for example by reaching for the platform canvas, is UNKNOWN, and the
+     * caller keeps the content, as before: the capture never drops content it did not see skipped.
+     */
+    fun probeContentDraw(
+        block: Any?,
+        anchor: Any,
+        sizePx: Pair<Int, Int>?,
+        density: Float,
+        fontScale: Float,
+        layoutDirection: Any?,
+    ): ContentDraw {
+        @Suppress("UNCHECKED_CAST")
+        val fn = block as? Function1<Any?, Any?> ?: return ContentDraw.UNKNOWN
+        val scopeClass = try {
+            Class.forName(CONTENT_DRAW_SCOPE, false, anchor.javaClass.classLoader)
+        } catch (_: Throwable) {
+            return ContentDraw.UNKNOWN
+        }
+        val size = sizePx?.let { packSize(it.first.toFloat(), it.second.toFloat()) } ?: packSize(0f, 0f)
+        val recorder = DrawRecorder(size, density, fontScale, layoutDirection)
+        val scope = recorder.proxy(scopeClass) ?: return ContentDraw.UNKNOWN
+        val returned = try {
+            fn.invoke(scope)
+            true
+        } catch (_: Throwable) {
+            false
+        }
+        return when {
+            recorder.contentDrawn -> ContentDraw.CONTENT
+            !returned -> ContentDraw.UNKNOWN
+            recorder.drewOwn -> ContentDraw.OWN_ONLY
+            else -> ContentDraw.NOTHING
+        }
+    }
+
+    /**
+     * The scope a probed content block runs on, and every Compose interface it reaches from there
+     * (DrawContext, Canvas, DrawTransform, Density), as dynamic proxies that answer with the node's
+     * size, density and layout direction, drop draws, and note whether drawContent() or a draw ran.
+     */
+    private class DrawRecorder(
+        private val size: Long,
+        private val density: Float,
+        private val fontScale: Float,
+        private val layoutDirection: Any?,
+    ) {
+        var contentDrawn = false
+            private set
+        var drewOwn = false
+            private set
+
+        fun proxy(iface: Class<*>): Any? = try {
+            java.lang.reflect.Proxy.newProxyInstance(iface.classLoader, arrayOf(iface)) { proxy, method, args ->
+                answer(proxy, method, args ?: emptyArray())
+            }
+        } catch (_: Throwable) {
+            null
+        }
+
+        private fun answer(proxy: Any, method: java.lang.reflect.Method, args: Array<Any?>): Any? {
+            val name = method.name
+            val returns = method.returnType
+            when {
+                name == "equals" && args.size == 1 -> return proxy === args[0]
+                name == "hashCode" && args.isEmpty() -> return System.identityHashCode(proxy)
+                name == "toString" && args.isEmpty() -> return "DrawRecorder(${method.declaringClass.simpleName})"
+                name == "drawContent" && args.isEmpty() -> {
+                    contentDrawn = true
+                    throw ContentDrawn()
+                }
+                // DrawScope's GraphicsLayer.record(size, block): run the block here, not into the
+                // app's live layer. Its drawContent() is this scope's.
+                name.startsWith("record") && args.any { it is Function1<*, *> } -> {
+                    @Suppress("UNCHECKED_CAST")
+                    (args.last { it is Function1<*, *> } as Function1<Any?, Any?>).invoke(proxy)
+                    return zero(returns)
+                }
+                name.startsWith("draw") -> {
+                    drewOwn = true
+                    return zero(returns)
+                }
+                args.isEmpty() && returns == java.lang.Long.TYPE && (name == "getSize" || name.startsWith("getSize-")) ->
+                    return size
+                args.isEmpty() && returns == java.lang.Long.TYPE && (name == "getCenter" || name.startsWith("getCenter-")) -> {
+                    val (w, h) = unpackOffset(size)
+                    return packSize(w / 2f, h / 2f)
+                }
+                args.isEmpty() && returns == java.lang.Float.TYPE && name == "getDensity" -> return density
+                args.isEmpty() && returns == java.lang.Float.TYPE && name == "getFontScale" -> return fontScale
+                args.isEmpty() && name == "getLayoutDirection" && layoutDirection != null -> return layoutDirection
+                args.isEmpty() && name == "getGraphicsLayer" -> return null
+                // DrawContext.canvas and .density have default bodies (EmptyCanvas, which throws on
+                // every call, and a density of 1): a recording proxy answers for them instead, as
+                // for drawContext and transform.
+                args.isEmpty() && name.startsWith("get") && returns.isInterface -> return proxy(returns)
+            }
+            // A member with a Kotlin default body (Density.toPx, DrawScope helpers): run that body.
+            val body = defaultBody(proxy, method, args)
+            if (body != null) return body.value
+            return zero(returns)
+        }
+
+        private class Answer(val value: Any?)
+
+        /** Runs a member's Kotlin default body, kept in the interface's DefaultImpls; null when there is none. */
+        private fun defaultBody(proxy: Any, method: java.lang.reflect.Method, args: Array<Any?>): Answer? {
+            val iface = method.declaringClass
+            val impl = try {
+                Class.forName(iface.name + "\$DefaultImpls", false, iface.classLoader).methods.firstOrNull {
+                    it.name == method.name && it.parameterTypes.contentEquals(arrayOf(iface, *method.parameterTypes))
+                }
+            } catch (_: Throwable) {
+                null
+            } ?: return null
+            return try {
+                Answer(impl.invoke(null, proxy, *args))
+            } catch (e: java.lang.reflect.InvocationTargetException) {
+                throw e.targetException
+            }
+        }
+
+        /** What a dropped call returns: zero for a primitive, a recording proxy for an interface. */
+        private fun zero(type: Class<*>): Any? = when (type) {
+            java.lang.Boolean.TYPE -> false
+            java.lang.Integer.TYPE -> 0
+            java.lang.Long.TYPE -> 0L
+            java.lang.Float.TYPE -> 0f
+            java.lang.Double.TYPE -> 0.0
+            java.lang.Short.TYPE -> 0.toShort()
+            java.lang.Byte.TYPE -> 0.toByte()
+            java.lang.Character.TYPE -> 0.toChar()
+            else -> if (type.isInterface) proxy(type) else null
+        }
+    }
+
+    /**
+     * The live drawWithCache nodes (CacheDrawModifierNodeImpl) of a LayoutNode, in chain order:
+     * its NodeChain from the head (the outermost modifier) through each node's child. Null when
+     * the chain can't be read.
+     */
+    private fun cacheDrawNodes(layoutNode: Any): List<Any>? {
+        var node = field(field(layoutNode, "nodes"), "head") ?: return null
+        val out = ArrayList<Any>()
+        repeat(10_000) {
+            if (node.javaClass.simpleName == "CacheDrawModifierNodeImpl") out.add(node)
+            node = field(node, "child") ?: return out
+        }
+        return null
+    }
+
+    /**
+     * The content block a drawWithCache node last built: its CacheDrawScope's DrawResult, the
+     * `onDrawWithContent` (or onDrawBehind) block the node runs on every draw. Null before the
+     * node's first draw, or when the node can't be read.
+     */
+    private fun cachedDrawBlock(node: Any?): Any? = field(field(field(node, "cacheDrawScope"), "drawResult"), "block")
 
     /**
      * How a Compose node reports an image. It is one when a painter draws an image or its
@@ -111,15 +321,49 @@ internal object ComposeVisuals {
             drawBoundsTaken = true
             return modifierBounds(info, nodeBounds)
         }
+        // A content block that skipped drawContent() hides every draw after it in the chain.
+        var contentSkipped = false
+        fun drawsHere(): Boolean = layerAlpha() > 0f && !contentSkipped
+        // drawWithCache keeps its content block on the live node, in chain order.
+        val cacheElements = infos.count { invoke0(it, "getModifier")?.javaClass?.simpleName == "DrawWithCacheElement" }
+        val cacheNodes by lazy { cacheDrawNodes(layoutNode) }
+        var cacheIndex = 0
         for (info in infos) {
             if (info == null) continue
             val element = invoke0(info, "getModifier") ?: continue
             val name = element.javaClass.simpleName
-            // Inside a layer at alpha 0 nothing is drawn; modifiers before it still are.
-            if (layerAlpha() <= 0f && name in DRAWING_ELEMENTS) continue
+            val cacheNode = if (name == "DrawWithCacheElement") {
+                // The k-th drawWithCache element is the k-th cache node, when the counts agree.
+                val i = cacheIndex++
+                cacheNodes?.takeIf { it.size == cacheElements }?.get(i)
+            } else {
+                null
+            }
+            // Inside a layer at alpha 0, or after a skipped drawContent(), nothing is drawn;
+            // modifiers before it still are.
+            if (!drawsHere() && name in DRAWING_ELEMENTS) continue
             if (isCustomDraw(name)) {
+                val block = when (name) {
+                    "DrawWithContentElement" -> field(element, "onDraw")
+                    "DrawWithCacheElement" -> cachedDrawBlock(cacheNode)
+                    else -> null
+                }
+                val drawn = if (block == null) {
+                    ContentDraw.UNKNOWN
+                } else {
+                    probeContentDraw(
+                        block, element, measuredSize(info, nodeBounds), density, fontScale,
+                        invoke0(layoutNode, "getLayoutDirection"),
+                    )
+                }
+                if (drawn == ContentDraw.OWN_ONLY || drawn == ContentDraw.NOTHING) {
+                    contentSkipped = true
+                    v = v.copy(contentSkipped = true)
+                }
+                // A block that put nothing on screen is no draw and sets no padding boundary.
+                if (drawn == ContentDraw.NOTHING) continue
                 // A draw like a background: it sets the inside/outside padding boundary and the
-                // draw bounds, and inside an alpha-0 layer it was skipped above.
+                // draw bounds, and where nothing is drawn it was skipped above.
                 seenDraw = true
                 v = v.copy(customDraw = true, drawBounds = firstDrawBounds(info))
                 continue
@@ -241,9 +485,10 @@ internal object ComposeVisuals {
                     } ?: continue
                     val alpha = layer.alpha?.takeIf { it.isFinite() }?.coerceIn(0f, 1f)
                     if (alpha != null && alpha < 1f) ownAlpha *= alpha
-                    // A layer's shadow is drawn with the layer's own alpha: none at 0.
+                    // A layer's shadow is drawn with the layer's own alpha: none at 0, and none
+                    // after a skipped drawContent().
                     val shadow = layer.shadowPx
-                        ?.takeIf { it.isFinite() && it > 0f && layerAlpha() > 0f && layer.shadowColorsVisible }
+                        ?.takeIf { it.isFinite() && it > 0f && drawsHere() && layer.shadowColorsVisible }
                         ?.let { it / density }
                     if (shadow != null) seenDraw = true
                     v = v.copy(

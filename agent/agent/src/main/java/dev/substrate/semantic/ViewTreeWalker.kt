@@ -519,12 +519,13 @@ object ViewTreeWalker {
         val bounds = coords?.let { ComposeVisuals.boundsInWindow(it) }
         val visuals = ComposeVisuals.read(node, density, fontScale, resources, bounds, inheritedAlpha)
         val subtreeAlpha = inheritedAlpha * (visuals.alpha ?: 1f)
-        // A layer at alpha 0 hides the node's content and its subtree, but whatever the node
-        // draws before that layer (background(Red).graphicsLayer(alpha = 0f)) stays on screen:
-        // emit only that, as a plain container with no semantics, and stop.
-        val hidden = subtreeAlpha <= 0f
+        // A layer at alpha 0 hides the node's content and its subtree, and so does a
+        // drawWithContent block that skips drawContent(), but whatever the node draws before
+        // that point (background(Red).graphicsLayer(alpha = 0f)) stays on screen: emit only
+        // that, as a plain container with no semantics, and stop.
+        val hidden = visuals.hidesContent(subtreeAlpha)
         if (hidden && !visuals.draws) {
-            log.appendLine("COMPOSE_SKIP hidden alpha=0 bounds=$bounds")
+            log.appendLine("COMPOSE_SKIP hidden alpha=$subtreeAlpha contentSkipped=${visuals.contentSkipped} bounds=$bounds")
             return
         }
 
@@ -1277,8 +1278,7 @@ object ViewTreeWalker {
             } ?: return null
 
         if (Build.VERSION.SDK_INT < 24) return null
-        val colors = drawable.colors ?: return null
-        if (colors.size < 2) return null
+        val stops = gradientStops(drawable.colors) ?: return null
 
         val type =
             when (drawable.gradientType) {
@@ -1297,9 +1297,20 @@ object ViewTreeWalker {
 
         return GradientInfo(
             type = type,
-            colors = colors.map { colorToHex(it) },
+            colors = stops,
             orientation = orientation,
         )
+    }
+
+    /**
+     * A View gradient's stops as hex, or null when it is no gradient to report: fewer than two
+     * stops, or every stop fully transparent, which draws nothing (the same check as Compose
+     * gradients, [ComposeVisuals.gradientVisible]). A transparent stop among visible ones is
+     * kept: it still shapes the fade.
+     */
+    internal fun gradientStops(colors: IntArray?): List<String>? {
+        if (colors == null || colors.size < 2) return null
+        return colors.map { colorToHex(it) }.takeIf { ComposeVisuals.gradientVisible(it) }
     }
 
     private val externalRenderPatterns =
