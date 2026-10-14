@@ -105,7 +105,7 @@ class ComposeDrawChainTest {
     }
     class TextAnnotatedStringElement(private val text: Any, private val style: Any)
     class SelectableTextAnnotatedStringElement(private val text: Any, private val style: Any)
-    class TextStringSimpleElement(private val text: String, private val style: Any)
+    class TextStringSimpleElement(private val text: String, private val style: Any, private val color: Any? = null)
 
     private fun read(vararg elements: Any): ComposeDrawInfo =
         ComposeVisuals.read(Node(*elements), density = 1f, fontScale = 1f, resources = null, nodeBounds = null)
@@ -734,5 +734,86 @@ class ComposeDrawChainTest {
             ViewTreeWalker.ComposeBox(Bounds(24, 24, 80, 80), MarginInfo(12, 12, 12, 12), tapTarget = Bounds(8, 8, 112, 112)),
             ViewTreeWalker.composeBox(true, node, v.drawBounds, v.margin, v.clickBounds),
         )
+    }
+
+    // Compose's ViewConfiguration, with minimumTouchTargetSize as a DpSize packed as Compose packs it.
+    class TouchViewConfiguration(private val widthDp: Float, private val heightDp: Float) {
+        fun getMinimumTouchTargetSize(): Long =
+            (java.lang.Float.floatToRawIntBits(widthDp).toLong() shl 32) or
+                (java.lang.Float.floatToRawIntBits(heightDp).toLong() and 0xFFFFFFFFL)
+    }
+
+    class TouchNode(private val configuration: Any, private vararg val infos: SizedInfo) {
+        fun getModifierInfo(): List<Any> = infos.toList()
+        fun getViewConfiguration(): Any = configuration
+    }
+
+    @Test
+    fun a_click_smaller_than_the_minimum_touch_target_taps_the_centered_minimum_box() {
+        // Modifier.size(24.dp).clickable { }.background(Red) at density 2: the icon is 48 px,
+        // and Compose hit-tests it over the 48 dp (96 px) box centered on it.
+        val icon = Bounds(24, 24, 48, 48)
+        val v = ComposeVisuals.read(
+            TouchNode(
+                TouchViewConfiguration(48f, 48f),
+                SizedInfo(ClickableElement(), placed(24, 24, 48)),
+                SizedInfo(BackgroundElement(red, Any()), placed(24, 24, 48)),
+            ),
+            density = 2f, fontScale = 1f, resources = null, nodeBounds = icon,
+        )
+        val touch = Bounds(0, 0, 96, 96)
+        assertEquals(touch, v.clickBounds)
+        assertEquals(
+            ViewTreeWalker.ComposeBox(icon, null, tapTarget = touch),
+            ViewTreeWalker.composeBox(true, icon, v.drawBounds, v.margin, v.clickBounds),
+        )
+        // A click at least that large keeps its own box.
+        val button = ComposeVisuals.read(
+            TouchNode(TouchViewConfiguration(48f, 48f), SizedInfo(ClickableElement(), placed(0, 0, 120))),
+            density = 2f, fontScale = 1f, resources = null, nodeBounds = Bounds(0, 0, 120, 120),
+        )
+        assertEquals(Bounds(0, 0, 120, 120), button.clickBounds)
+    }
+
+    // A BasicText color producer, and one that writes app state when it is asked for its color.
+    class ColorProducer(private val color: Long) {
+        fun invoke(): Long = color
+    }
+    class WritingColorProducer(private val state: FakeState<Int>, private val color: Long) {
+        fun invoke(): Long {
+            state.value = state.value + 1
+            return color
+        }
+    }
+
+    @Test
+    fun a_text_color_producer_runs_in_a_read_only_snapshot() {
+        fun text(producer: Any) = ComposeVisuals.read(
+            Node(TextStringSimpleElement("Hello", ColorTextStyle(unspecified), producer)),
+            density = 1f, fontScale = 1f, resources = null, nodeBounds = null,
+        )
+        assertEquals("#FF0000", text(ColorProducer(red)).textColor)
+        // A producer that writes state is refused: no color, and the state is unchanged.
+        val state = FakeState(0)
+        assertNull(text(WritingColorProducer(state, red)).textColor)
+        assertEquals(0, state.value)
+        assertNull(Snapshot.current)
+    }
+
+    // Compose's RectangleShape, the default background shape.
+    object RectangleShape
+
+    @Test
+    fun an_inner_opaque_background_over_the_same_box_replaces_the_outer_one() {
+        // Modifier.background(Red).background(Blue): blue is drawn over the whole red box.
+        val box = placed(0, 0, 40)
+        fun fills(vararg elements: Any) = readSized(Bounds(0, 0, 40, 40), 1f, *elements.map { SizedInfo(it, box) }.toTypedArray())
+        assertEquals("#0000FF", fills(BackgroundElement(red, RectangleShape), BackgroundElement(blue, RectangleShape)).background)
+        // A translucent inner fill lets the outer one through: it stays the background.
+        val halfBlue = 0x800000FFL shl 32
+        assertEquals("#FF0000", fills(BackgroundElement(red, RectangleShape), BackgroundElement(halfBlue, RectangleShape)).background)
+        // A rounded inner fill leaves the outer one showing at its corners.
+        val rounded = RoundedCornerShape(DpCornerSize(8f))
+        assertEquals("#FF0000", fills(BackgroundElement(red, RectangleShape), BackgroundElement(blue, rounded)).background)
     }
 }

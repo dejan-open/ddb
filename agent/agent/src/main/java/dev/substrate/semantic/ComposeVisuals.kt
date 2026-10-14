@@ -475,6 +475,8 @@ internal object ComposeVisuals {
         var clickSeen = false
         // The box a minimum interactive size modifier before the click grew the node to.
         var minimumTouchBounds: Bounds? = null
+        // The window box the first background fill was drawn in.
+        var fillBounds: Bounds? = null
         // The first drawing modifier owns the draw bounds, even when they equal the node's
         // (recorded as null): a later modifier inside padding must not replace them.
         var drawBoundsTaken = false
@@ -544,7 +546,8 @@ internal object ComposeVisuals {
             when (name) {
                 in CLICK_ELEMENTS -> if (!clickSeen) {
                     clickSeen = true
-                    clickBounds = minimumTouchBounds ?: ownBounds(info)
+                    clickBounds = minimumTouchBounds
+                        ?: ownBounds(info)?.let { touchExpanded(it, info, layoutNode, density) }
                 }
                 "MinimumInteractiveModifier" ->
                     if (!clickSeen && minimumTouchBounds == null) minimumTouchBounds = ownBounds(info)
@@ -573,9 +576,16 @@ internal object ComposeVisuals {
                     } else {
                         null
                     }
+                    // A later opaque solid fill over the whole box an earlier fill was drawn in
+                    // (background(Red).background(Blue)) covers it: the inner one is what shows.
+                    // A translucent one, a shaped one or one in another box only draws over part.
+                    val box = ownBounds(info)
+                    val covers = solid != null && solid.length == 7 && box != null && box == fillBounds &&
+                        rectangular(field(element, "shape"))
+                    if (v.background == null && v.gradient == null) fillBounds = box
                     v = v.copy(
-                        background = v.background ?: solid,
-                        gradient = v.gradient ?: grad ?: opaqueBrush,
+                        background = if (covers) solid else v.background ?: solid,
+                        gradient = if (covers) null else v.gradient ?: grad ?: opaqueBrush,
                         cornerRadius = v.cornerRadius ?: cornerRadius(field(element, "shape"), density, measuredSize(info, nodeBounds)),
                         drawBounds = firstDrawBounds(info),
                     )
@@ -1287,13 +1297,21 @@ internal object ComposeVisuals {
         }
     }
 
+    /**
+     * The color a BasicText ColorProducer returns, evaluated inside a read-only Compose snapshot
+     * ([runInReadOnlySnapshot]) like the other app callbacks run here: it can read app state but
+     * not change it. A producer that writes state (refused there), throws, or can't be run in a
+     * read-only snapshot is an unreadable color: null.
+     */
     private fun producerPacked(producer: Any?): Long? {
         if (producer == null) return null
         return try {
             val m = producer.javaClass.methods.firstOrNull {
                 it.name.startsWith("invoke") && it.parameterCount == 0 && it.returnType == java.lang.Long.TYPE
-            }
-            m?.invoke(producer) as? Long
+            } ?: return null
+            var packed: Long? = null
+            if (!runInReadOnlySnapshot(producer.javaClass.classLoader) { packed = m.invoke(producer) as? Long }) return null
+            packed
         } catch (_: Throwable) {
             null
         }
@@ -1520,6 +1538,13 @@ internal object ComposeVisuals {
         return (drawn[0] / density).takeIf { it.isFinite() && it > 0f }
     }
 
+    /**
+     * Whether a background shape fills its whole box: Compose's RectangleShape (an object whose
+     * class is RectangleShapeKt$RectangleShape$1 and whose toString() is "RectangleShape").
+     */
+    private fun rectangular(shape: Any?): Boolean =
+        shape != null && (shape.javaClass.name.contains("RectangleShape") || shape.toString() == "RectangleShape")
+
     private fun painterType(painter: Any?): String? {
         val name = painter?.javaClass?.simpleName ?: return null
         return when {
@@ -1548,6 +1573,31 @@ internal object ComposeVisuals {
 
     /** The box a modifier draws in: the coordinator of the next layout modifier inward. */
     private fun ownBounds(info: Any): Bounds? = invoke0(info, "getCoordinates")?.let { boundsInWindow(it) }
+
+    /**
+     * The box a touch lands on a click attached to [info]'s coordinator: Compose hit-tests a
+     * pointer input node smaller than the ViewConfiguration's minimumTouchTargetSize (48 dp by
+     * default) over that size, centered on it (NodeCoordinator's minimum touch target padding:
+     * half of what the measured size lacks on each axis). [bounds] as is when the size or the
+     * minimum can't be read, or when the box is already at least that large.
+     */
+    private fun touchExpanded(bounds: Bounds, info: Any, layoutNode: Any, density: Float): Bounds {
+        val packed = invokePrefix(invoke0(layoutNode, "getViewConfiguration"), "getMinimumTouchTargetSize") as? Long
+            ?: return bounds
+        // A DpSize packs its width's float bits in the high 32 bits and its height's in the low.
+        val minW = java.lang.Float.intBitsToFloat((packed ushr 32).toInt()) * density
+        val minH = java.lang.Float.intBitsToFloat((packed and 0xFFFFFFFFL).toInt()) * density
+        val size = (invokePrefix(invoke0(info, "getCoordinates"), "getSize") as? Long)?.let { unpackIntSize(it) }
+            ?: return bounds
+        val padX = ((minW - size.first) / 2f).takeIf { it.isFinite() && it > 0f } ?: 0f
+        val padY = ((minH - size.second) / 2f).takeIf { it.isFinite() && it > 0f } ?: 0f
+        if (padX == 0f && padY == 0f) return bounds
+        val left = kotlin.math.floor(bounds.x - padX).toInt()
+        val top = kotlin.math.floor(bounds.y - padY).toInt()
+        val right = kotlin.math.ceil(bounds.x + bounds.w + padX).toInt()
+        val bottom = kotlin.math.ceil(bounds.y + bounds.h + padY).toInt()
+        return Bounds(left, top, right - left, bottom - top)
+    }
 
     private fun modifierBounds(info: Any, nodeBounds: Bounds?): Bounds? {
         val b = ownBounds(info) ?: return null

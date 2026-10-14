@@ -647,7 +647,8 @@ object ViewTreeWalker {
      * size(96.dp).wrapContentSize().clickable { }.size(40.dp). That box is the
      * tap target when it differs from the drawn one; for padding(8.dp).clickable { } it is the
      * drawn box, and there is none. With no draw bounds the whole box is reported,
-     * with no margin, so no stretch of screen is counted both as the element and as its margin.
+     * with no margin, so no stretch of screen is counted both as the element and as its margin,
+     * and a click box around it (Compose's minimum touch target) is its tap target.
      */
     internal fun composeBox(
         touchable: Boolean,
@@ -661,8 +662,13 @@ object ViewTreeWalker {
             val target = clickBounds ?: bounds.takeIf { margin == null }
             ComposeBox(drawBounds, margin, tapTarget = if (touchable && target != drawBounds) target else null)
         } else {
-            ComposeBox(bounds, null)
+            // A click Compose hit-tests over more than the whole box (a 24 dp icon's 48 dp
+            // minimum touch target) still taps that larger box.
+            val target = clickBounds?.takeIf { touchable && bounds != null && it != bounds && it.encloses(bounds) }
+            ComposeBox(bounds, null, tapTarget = target)
         }
+
+    private fun Bounds.encloses(b: Bounds): Boolean = x <= b.x && y <= b.y && x + w >= b.x + b.w && y + h >= b.y + b.h
 
     /** The TextLayoutResult the node's GetTextLayoutResult semantics action returns, or null. */
     private fun textLayoutResult(config: Any?): Any? {
