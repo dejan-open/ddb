@@ -1307,13 +1307,46 @@ object ViewTreeWalker {
     )
 
     /**
-     * A View's background as it draws: the layer that draws ([drawnLayer]), with the View's
-     * background tint ([backgroundTint]). A ColorDrawable is a fill; a GradientDrawable is read
-     * by [gradientBackground]. Every color is faded by the View's [alpha] (its own times every
+     * A View's background as it draws, with the View's background tint ([backgroundTint]). A
+     * ColorDrawable is a fill; a GradientDrawable is read by [gradientBackground]. A
+     * RippleDrawable draws its non-mask layers in order: the first one, unless a later one over
+     * the same bounds covers it (an opaque, square fill with no gradient, by the cover rule the
+     * Compose path uses). Every color is faded by the View's [alpha] (its own times every
      * ancestor's), as its RenderNode draws it. Null for any other drawable, or no background.
      */
     internal fun viewBackground(view: View, density: Float, alpha: Float = 1f): DrawnBackground? {
-        val layer = drawnLayer(view.background) ?: return null
+        val background = view.background ?: return null
+        if (background !is RippleDrawable) return layerBackground(view, background, density, alpha)
+        var chosen = -1
+        var drawn: DrawnBackground? = null
+        for (i in 0 until background.numberOfLayers) {
+            if (background.getId(i) == android.R.id.mask) continue
+            val layer = background.getDrawable(i) ?: continue
+            // Judged at the layer's own opacity, before the View's alpha.
+            if (chosen < 0 || (covers(layerBackground(view, layer, density)) && sameLayerBounds(background, chosen, i))) {
+                chosen = i
+                drawn = layerBackground(view, layer, density, alpha)
+            }
+        }
+        return drawn
+    }
+
+    /** Whether a drawn background hides everything under it in its bounds: an opaque square fill, no gradient. */
+    private fun covers(drawn: DrawnBackground?): Boolean =
+        drawn != null && drawn.fill?.length == 7 && drawn.cornerRadiusPx == null && drawn.gradient == null && !drawn.customDraw
+
+    /** Whether layers [a] and [b] of [layers] are drawn in the same bounds: the same insets, size and gravity. */
+    private fun sameLayerBounds(layers: android.graphics.drawable.LayerDrawable, a: Int, b: Int): Boolean {
+        fun box(i: Int) = listOf(
+            layers.getLayerInsetLeft(i), layers.getLayerInsetTop(i), layers.getLayerInsetRight(i), layers.getLayerInsetBottom(i),
+            layers.getLayerInsetStart(i), layers.getLayerInsetEnd(i), layers.getLayerWidth(i), layers.getLayerHeight(i),
+            layers.getLayerGravity(i),
+        )
+        return box(a) == box(b)
+    }
+
+    /** One drawable [layer] of a View's background as it draws (see [viewBackground]). */
+    private fun layerBackground(view: View, layer: Drawable, density: Float, alpha: Float = 1f): DrawnBackground? {
         val tint = backgroundTint(view, layer)
         return when (layer) {
             // getColor() is the color with the drawable's alpha already applied (setAlpha).
@@ -1331,14 +1364,47 @@ object ViewTreeWalker {
      * state (Drawable.updateTintFilter: `getColorForState(getState(), Color.TRANSPARENT)`), with
      * the View's tint blend mode (null when unset: the drawable default, SRC_IN). View hands both
      * to its background (applyBackgroundTint), and a RippleDrawable to its layers. Null with no
-     * tint, or when [layer] has a color filter of its own: ColorDrawable and GradientDrawable both
-     * draw with that one and ignore the tint's.
+     * tint. When [layer] has a color filter of its own, ColorDrawable and GradientDrawable both
+     * draw with that one and ignore the tint's: that filter is the tint ([filterTint]).
      */
     internal fun backgroundTint(view: View, layer: Drawable): Tint? {
-        if (layer.colorFilter != null) return null
+        layer.colorFilter?.let { return filterTint(it) }
         val color = stateColor(view.backgroundTintList, layer.state, android.graphics.Color.TRANSPARENT) ?: return null
         val mode = if (Build.VERSION.SDK_INT >= 29) view.backgroundTintBlendMode?.name else view.backgroundTintMode?.name
         return Tint(color, mode)
+    }
+
+    /**
+     * An explicit drawable color filter as the tint it draws like: a BlendModeColorFilter or a
+     * PorterDuffColorFilter's color and mode. Any other filter (lighting, a color matrix), or one
+     * whose color or mode can't be read, is a tint in a mode [tinted] doesn't model, so the colors
+     * it filters are left out, not reported unfiltered.
+     */
+    internal fun filterTint(filter: android.graphics.ColorFilter): Tint = when (filter) {
+        is android.graphics.BlendModeColorFilter -> Tint(filter.color, filter.mode.name)
+        is android.graphics.PorterDuffColorFilter -> porterDuffTint(filter) ?: UNDECODED_FILTER
+        else -> UNDECODED_FILTER
+    }
+
+    /** A filter whose effect isn't modelled: [tinted] yields null for its mode. */
+    private val UNDECODED_FILTER = Tint(0, "undecoded")
+
+    /** A PorterDuffColorFilter's color and mode, which it keeps behind hidden getters (fields on older releases). */
+    private fun porterDuffTint(filter: android.graphics.PorterDuffColorFilter): Tint? = try {
+        val cls = android.graphics.PorterDuffColorFilter::class.java
+        val color = try {
+            cls.getDeclaredMethod("getColor").invoke(filter) as? Int
+        } catch (_: NoSuchMethodException) {
+            cls.getDeclaredField("mColor").apply { isAccessible = true }.get(filter) as? Int
+        }
+        val mode = try {
+            cls.getDeclaredMethod("getMode").invoke(filter) as? android.graphics.PorterDuff.Mode
+        } catch (_: NoSuchMethodException) {
+            cls.getDeclaredField("mMode").apply { isAccessible = true }.get(filter) as? android.graphics.PorterDuff.Mode
+        }
+        if (color != null && mode != null) Tint(color, mode.name) else null
+    } catch (_: Throwable) {
+        null
     }
 
     /**

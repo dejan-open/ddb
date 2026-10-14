@@ -27,8 +27,9 @@ internal data class ComposeDrawInfo(
     val maxLines: Int? = null,
     /**
      * The node draws through a custom draw modifier (drawBehind, drawWithContent or
-     * drawWithCache; a Compose Canvas is a Spacer with drawBehind). What it draws can't be
-     * read, but it is on screen like any other visual.
+     * drawWithCache; a Compose Canvas is a Spacer with drawBehind), or a ColorPainter fill under
+     * a color filter that can't be decoded. What it draws can't be read, but it is on screen like
+     * any other visual.
      */
     val customDraw: Boolean = false,
     /** Bounds of the first drawing modifier, when it differs from the node's (an outer padding). */
@@ -658,17 +659,27 @@ internal object ComposeVisuals {
                     if (painter?.javaClass?.simpleName == "ColorPainter") {
                         // ColorPainter fills its bounds with one color: that is a background, not
                         // an image, and a transparent one draws nothing (no padding boundary).
-                        val fill = (field(painter, "color") as? Long)?.let { colorHex(element, it, alpha = painterAlpha * layerAlpha()) }
-                            ?: continue
+                        val base = (field(painter, "color") as? Long)?.takeIf { it != UNSPECIFIED_COLOR }?.let { argb(element, it) }
+                        if (base == null || (scaleAlpha(base, painterAlpha * layerAlpha()) ushr 24) == 0) continue
                         seenDraw = true
+                        // The painter's color filter applies to the fill by the rule image tints
+                        // follow ([tinted]: SrcIn, Src, SrcAtop); one that can't be decoded
+                        // (lighting, a color matrix, another blend mode) leaves its color unknown.
+                        val filter = field(element, "colorFilter")
+                        val filtered = if (filter == null) null else filteredArgb(filter, scaleAlpha(base, painterAlpha), element)
+                        val fill = if (filter == null) {
+                            argbHex(scaleAlpha(base, painterAlpha * layerAlpha()), keepTransparent = false)
+                        } else {
+                            filtered?.let { argbHex(scaleAlpha(it, layerAlpha()), keepTransparent = false) }
+                        }
                         // An opaque one over the whole box an earlier fill or image was drawn in
                         // covers it, by the same rule as a covering background (judged at its own
                         // opacity, in the same layer): it replaces the color, gradient, the fill's
-                        // corner radius and the image.
+                        // corner radius and the image. A fill whose color is unknown covers nothing.
                         val box = ownBounds(info)
-                        val localFill = (field(painter, "color") as? Long)?.let { colorHex(element, it, alpha = painterAlpha) }
+                        val localFill = if (filter == null) argbHex(scaleAlpha(base, painterAlpha), keepTransparent = false) else filtered?.let { argbHex(it, keepTransparent = false) }
                         val covers = localFill != null && localFill.length == 7 && box != null && box == fillBounds &&
-                            layerAlpha() == fillAlpha && field(element, "colorFilter") == null
+                            layerAlpha() == fillAlpha
                         if (fillBounds == null) {
                             fillBounds = box
                             fillAlpha = layerAlpha()
@@ -679,6 +690,8 @@ internal object ComposeVisuals {
                             cornerRadius = if (covers && radiusFromFill) null else v.cornerRadius,
                             imageType = if (covers) null else v.imageType,
                             imageTint = if (covers) null else v.imageTint,
+                            // A fill whose color is unknown is still on screen.
+                            customDraw = v.customDraw || fill == null,
                             drawBounds = firstDrawBounds(info),
                         )
                         continue
@@ -1381,6 +1394,18 @@ internal object ComposeVisuals {
     private fun colorFilterHex(filter: Any?, anchor: Any, alpha: Float): String? {
         if (filter == null) return null
         return (field(filter, "color") as? Long)?.let { colorHex(anchor, it, alpha = alpha) }
+    }
+
+    /**
+     * The color a painter's color filter turns [src] (ARGB) into: for a BlendModeColorFilter (what
+     * ColorFilter.tint makes) in a mode [tinted] models, the tinted color. Null for any other
+     * filter (lighting, a color matrix), mode, or a color or mode that can't be read.
+     */
+    private fun filteredArgb(filter: Any, src: Int, anchor: Any): Int? {
+        if (filter.javaClass.simpleName != "BlendModeColorFilter") return null
+        val color = argb(anchor, field(filter, "color") as? Long) ?: return null
+        val mode = (field(filter, "blendMode") as? Int)?.let { blendModeName(anchor, it) } ?: return null
+        return tinted(src, color, mode)
     }
 
     /**

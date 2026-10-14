@@ -175,6 +175,47 @@ class ViewDrawableTest {
     }
 
     @Test
+    fun a_later_opaque_ripple_layer_covers_the_earlier_ones() {
+        val highlight = ColorStateList.valueOf(Color.GRAY)
+        // RippleDrawable draws every non-mask layer in order: red content, then an opaque blue
+        // layer over the same bounds, is a blue background.
+        val covered = RippleDrawable(highlight, ColorDrawable(Color.RED), null).apply { addLayer(ColorDrawable(Color.BLUE)) }
+        assertEquals("#0000FF", background(sized(covered))!!.fill)
+        // A translucent later layer lets the first one show.
+        val translucent = RippleDrawable(highlight, ColorDrawable(Color.RED), null).apply { addLayer(ColorDrawable(0x800000FF.toInt())) }
+        assertEquals("#FF0000", background(sized(translucent))!!.fill)
+    }
+
+    @Test
+    fun an_explicit_drawable_color_filter_recolors_what_it_draws() {
+        // A red shape with a green stroke and a blue SRC_IN PorterDuffColorFilter draws blue.
+        val shape = GradientDrawable().apply {
+            setColor(Color.RED)
+            setStroke(4, Color.GREEN)
+            colorFilter = PorterDuffColorFilter(Color.BLUE, PorterDuff.Mode.SRC_IN)
+        }
+        val drawn = background(sized(shape))!!
+        assertEquals("#0000FF", drawn.fill)
+        assertEquals(BorderInfo(4f, "#0000FF"), drawn.border)
+        // A BlendModeColorFilter on a ColorDrawable, and on a gradient's stops, the same way.
+        val color = ColorDrawable(Color.RED).apply { colorFilter = android.graphics.BlendModeColorFilter(Color.BLUE, BlendMode.SRC_IN) }
+        assertEquals("#0000FF", background(sized(color))!!.fill)
+        val gradient = GradientDrawable(GradientDrawable.Orientation.TOP_BOTTOM, intArrayOf(Color.RED, Color.GREEN)).apply {
+            colorFilter = PorterDuffColorFilter(Color.BLUE, PorterDuff.Mode.SRC_IN)
+        }
+        assertEquals(listOf("#0000FF", "#0000FF"), background(sized(gradient))!!.gradient!!.colors)
+        // A filter that can't be decoded leaves the colors out instead of reporting them unfiltered.
+        val lit = GradientDrawable().apply {
+            setColor(Color.RED)
+            setStroke(4, Color.GREEN)
+            colorFilter = android.graphics.LightingColorFilter(0, Color.BLUE)
+        }
+        val unknown = background(sized(lit))!!
+        assertNull(unknown.fill)
+        assertNull(unknown.border)
+    }
+
+    @Test
     fun a_background_tint_recolors_what_the_background_draws() {
         val blue = ColorStateList.valueOf(Color.BLUE)
         // android:backgroundTint="@color/blue" over a red rounded shape with a green stroke: the

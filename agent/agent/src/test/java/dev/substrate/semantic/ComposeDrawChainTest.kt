@@ -903,4 +903,26 @@ class ComposeDrawChainTest {
         val halfBlue = 0x800000FFL shl 32
         assertEquals("#FF0000", chain(BackgroundElement(red, RectangleShape), PainterElement(ColorPainter(halfBlue))).background)
     }
+
+    // ColorFilter.lighting(…): a LightingColorFilter, which the tint rule doesn't model.
+    class LightingColorFilter
+
+    @Test
+    fun a_color_filter_recolors_a_color_painter_fill() {
+        // paint(ColorPainter(Red), colorFilter = ColorFilter.tint(Blue)): a blue box.
+        assertEquals("#0000FF", read(PainterElement(ColorPainter(red), tint(blue))).background)
+        // Src replaces it too.
+        assertEquals("#0000FF", read(PainterElement(ColorPainter(red), tint(blue, BlendMode.Src))).background)
+        // A filter that can't be decoded (lighting, or a mode that isn't modelled) leaves the
+        // color unknown, not the unfiltered red.
+        val lit = read(PainterElement(ColorPainter(red), LightingColorFilter()))
+        assertNull(lit.background)
+        assertTrue(lit.draws)
+        assertNull(read(PainterElement(ColorPainter(red), tint(blue, BlendMode.SrcOver))).background)
+        // Resolved to an opaque color, it covers the fill under it; an unknown one doesn't.
+        val box = placed(0, 0, 40)
+        fun chain(vararg elements: Any) = readSized(Bounds(0, 0, 40, 40), 1f, *elements.map { SizedInfo(it, box) }.toTypedArray())
+        assertEquals("#0000FF", chain(BackgroundElement(red, RectangleShape), PainterElement(ColorPainter(0xFF00FF00L shl 32), tint(blue))).background)
+        assertEquals("#FF0000", chain(BackgroundElement(red, RectangleShape), PainterElement(ColorPainter(blue), LightingColorFilter())).background)
+    }
 }
